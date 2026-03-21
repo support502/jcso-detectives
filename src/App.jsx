@@ -772,7 +772,7 @@ function WeeklyDetailView({ detectives }) {
     })
   }, [selectedUser, weekStart])
 
-  const selectedDet = dets.find(d => d.id === selectedUser)
+  const selectedDet = dets.find(d => String(d.id) === String(selectedUser))
   const fields = selectedDet ? UNIT_FIELDS[selectedDet.unit] : []
   const weekDates = getWeekDates(weekStart)
 
