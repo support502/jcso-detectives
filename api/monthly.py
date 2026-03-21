@@ -170,6 +170,44 @@ def fill_monthly(month, year, entries):
     for det_name, config in UNI_DETECTIVES.items():
         fill_detective(det_name, config, UNI_STAT_COLS, INTER_DRUG_COLS)
 
+    # ── Populate Year Total sheet ──
+    # The Year Total sheet uses cross-sheet formula references (e.g. =Jan!$C$24)
+    # which suffer the same stale-cache problem as the weekly SUM formulas.
+    # We read the values we just wrote and write numeric values directly.
+    yt = wb['Year Total']
+    mc = chr(ord('B') + month - 1)  # Jan→B, Feb→C, … Dec→M
+
+    # Interdiction totals (rows 3–12) ← monthly sheet row 24, cols C–L
+    inter_year_rows = {
+        3: 'C', 4: 'D', 5: 'E', 6: 'F', 7: 'G',
+        8: 'H', 9: 'I', 10: 'J', 11: 'K', 12: 'L',
+    }
+    for yt_row, monthly_col in inter_year_rows.items():
+        val = ws[f'{monthly_col}24'].value
+        if val is not None:
+            yt[f'{mc}{yt_row}'] = val
+
+    # Uniform totals (rows 21–29) ← monthly sheet row 55, cols D–L
+    uni_year_rows = {
+        21: 'D', 22: 'E', 23: 'F', 24: 'G', 25: 'H',
+        26: 'I', 27: 'J', 28: 'K', 29: 'L',
+    }
+    for yt_row, monthly_col in uni_year_rows.items():
+        val = ws[f'{monthly_col}55'].value
+        if val is not None:
+            yt[f'{mc}{yt_row}'] = val
+
+    # Drug seizure totals (rows 32–38) ← monthly sheet cols N–T
+    # Cocaine (row 33) references monthly row 31; all others reference row 52
+    drug_year_rows = {
+        32: ('N', 52), 33: ('O', 31), 34: ('P', 52),
+        35: ('Q', 52), 36: ('R', 52), 37: ('S', 52), 38: ('T', 52),
+    }
+    for yt_row, (monthly_col, monthly_row) in drug_year_rows.items():
+        val = ws[f'{monthly_col}{monthly_row}'].value
+        if val is not None:
+            yt[f'{mc}{yt_row}'] = val
+
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
