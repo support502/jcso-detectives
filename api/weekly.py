@@ -71,10 +71,9 @@ def fill_template(unit, detective_name, week_start, entries):
     # col_letters: C, D, E, ... for each stat
     col_letters = [chr(ord('C') + i) for i in range(len(cols))]
 
-    # ── Write detective last name into A1 ──
+    # ── Write detective last name into A1 (no label prefix) ──
     last_name = detective_name.split()[-1]
-    prefix = 'NAME: ' if unit == 'Uniform' else 'NAME '
-    ws['A1'] = prefix + last_name
+    ws['A1'] = last_name
 
     # ── Write the actual date into every day's B cell ──
     # The template uses =B4+N formulas for Mon–Sat; openpyxl saves those as
@@ -127,12 +126,28 @@ def fill_template(unit, detective_name, week_start, entries):
                 if cell.value is None or cell.value == 0:
                     cell.value = 0
 
-    # ── Force Excel to fully recalculate SUM formulas on open ──
-    # openpyxl preserves the formula strings but also the stale cached values
-    # (0s) from the original template. forceFullCalc tells Excel to ignore the
-    # cache and recalculate every formula when the file is first opened.
-    wb.calculation.calcMode = 'auto'
-    wb.calculation.forceFullCalc = True
+    # ── Compute and write weekly totals to row 26 ──
+    #
+    # The template SUM formulas use two different inclusion patterns:
+    #   cols[0] and cols[1]  (C and D)  →  Mon–Fri only  → rows 7,10,13,16,19
+    #   cols[2] onward       (E–M)      →  all 7 days    → rows 4,7,10,13,16,19,22
+    #
+    # We calculate these sums from the values we just wrote, then overwrite the
+    # formula cells with the numeric results. This is more reliable than relying
+    # on Excel to recalculate the stale cached values that openpyxl carries over
+    # from the original template.
+    #
+    # Verified against template formulas (both Uniform and UC are identical):
+    #   C26 = '=SUM(C7,C10,C13,C16,C19)'
+    #   D26 = '=SUM(D7,D10,D13,D16,D19)'
+    #   E26 = '=SUM(E4,E7,E10,E13,E16,E19,E22)'  ← same pattern for F–M
+    mon_fri_rows  = [7, 10, 13, 16, 19]           # day_idx 1–5
+    all_seven_rows = [4, 7, 10, 13, 16, 19, 22]   # day_idx 0–6
+
+    for i, cl in enumerate(col_letters):
+        rows_to_sum = mon_fri_rows if i < 2 else all_seven_rows
+        total = sum(ws[f'{cl}{r}'].value or 0 for r in rows_to_sum)
+        ws[f'{cl}26'] = total
 
     # ── Save to bytes ──
     output = io.BytesIO()
