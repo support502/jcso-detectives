@@ -71,13 +71,18 @@ def fill_template(unit, detective_name, week_start, entries):
     # col_letters: C, D, E, ... for each stat
     col_letters = [chr(ord('C') + i) for i in range(len(cols))]
 
-    # ── Write detective name into A1 ──
+    # ── Write detective last name into A1 ──
+    last_name = detective_name.split()[-1]
     prefix = 'NAME: ' if unit == 'Uniform' else 'NAME '
-    ws['A1'] = prefix + detective_name
+    ws['A1'] = prefix + last_name
 
-    # ── Write Sunday date into B4 ──
+    # ── Write the actual date into every day's B cell ──
+    # The template uses =B4+N formulas for Mon–Sat; openpyxl saves those as
+    # literal strings that won't recalculate reliably. Replace all with real dates.
     sunday = datetime.datetime.strptime(week_start, '%Y-%m-%d')
-    ws['B4'] = sunday
+    for day_idx, data_row in enumerate(DATA_ROWS):
+        day_date = sunday + datetime.timedelta(days=day_idx)
+        ws[f'B{data_row}'] = day_date
 
     # ── Build lookup: day_index (0=Sun … 6=Sat) → entry ──
     entry_map = {}
@@ -122,6 +127,13 @@ def fill_template(unit, detective_name, week_start, entries):
                 if cell.value is None or cell.value == 0:
                     cell.value = 0
 
+    # ── Force Excel to fully recalculate SUM formulas on open ──
+    # openpyxl preserves the formula strings but also the stale cached values
+    # (0s) from the original template. forceFullCalc tells Excel to ignore the
+    # cache and recalculate every formula when the file is first opened.
+    wb.calculation.calcMode = 'auto'
+    wb.calculation.forceFullCalc = True
+
     # ── Save to bytes ──
     output = io.BytesIO()
     wb.save(output)
@@ -156,7 +168,8 @@ def generate_interdiction(detective_name, week_start, entries):
     )
 
     # ── Row 1: Name + title ──
-    ws['A1'] = f'NAME: {detective_name}'
+    last_name = detective_name.split()[-1]
+    ws['A1'] = f'NAME: {last_name}'
     ws['A1'].font = Font(name='DM Sans', bold=True, size=12)
     ws.merge_cells(f'A1:B1')
     ws['C1'] = 'Weekly Activity Report'
