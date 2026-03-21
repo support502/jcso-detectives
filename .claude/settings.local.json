@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx vite:*)",
+      "Bash(python3 -c \"import openpyxl; print\\(''''ok''''\\)\")",
+      "Bash(pip install:*)",
+      "Bash(python3:*)",
+      "Bash(ls c:/Users/bchow/Downloads/jcso-detectives/vite.config.*)",
+      "Bash(npm uninstall:*)"
+    ]
+  }
+}
