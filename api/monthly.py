@@ -140,73 +140,111 @@ def fill_monthly(month, year, entries):
                     pass
         return total if total else None
 
-    def fill_detective(det_name, det_config, stat_cols, drug_cols=None):
-        """Fill week rows for one detective."""
+    # ── Python-calculated monthly totals (never read from formula cells) ──
+    # Accumulated while filling week rows; written directly to Year Total sheet.
+    inter_month = {}   # stat_key → float total across all interdiction detectives
+    uni_month   = {}   # stat_key → float total across all uniform detectives
+    drug_month  = {}   # stat_key → float total across ALL detectives (both units)
+
+    def _add(acc, key, val):
+        if val:
+            acc[key] = acc.get(key, 0.0) + val
+
+    def fill_detective(det_name, det_config, stat_cols, drug_cols=None,
+                       stat_acc=None, drug_acc=None):
+        """Fill week rows for one detective and accumulate monthly totals."""
         for wi, ws_str in enumerate(week_starts):
             if wi >= 5:
                 break
             elist = week_entries.get((det_name, ws_str), [])
 
-            # Fill stat columns
             stat_row = det_config['stat_weeks'][wi]
             for col_letter, stat_key in stat_cols.items():
                 val = sum_stats(elist, stat_key)
                 if val is not None:
                     ws[f'{col_letter}{stat_row}'] = val
+                    if stat_acc is not None:
+                        _add(stat_acc, stat_key, val)
 
-            # Fill drug seizure columns (if applicable)
             if drug_cols:
                 drug_row = det_config['drug_weeks'][wi]
                 for col_letter, stat_key in drug_cols.items():
                     val = sum_stats(elist, stat_key)
                     if val is not None:
                         ws[f'{col_letter}{drug_row}'] = val
+                        if drug_acc is not None:
+                            _add(drug_acc, stat_key, val)
 
     # ── Fill Interdiction detectives ──
     for det_name, config in INTER_DETECTIVES.items():
-        fill_detective(det_name, config, INTER_STAT_COLS, INTER_DRUG_COLS)
+        fill_detective(det_name, config, INTER_STAT_COLS, INTER_DRUG_COLS,
+                       stat_acc=inter_month, drug_acc=drug_month)
 
     # ── Fill Uniform detectives ──
     for det_name, config in UNI_DETECTIVES.items():
-        fill_detective(det_name, config, UNI_STAT_COLS, INTER_DRUG_COLS)
+        fill_detective(det_name, config, UNI_STAT_COLS, INTER_DRUG_COLS,
+                       stat_acc=uni_month, drug_acc=drug_month)
 
-    # ── Populate Year Total sheet ──
-    # The Year Total sheet uses cross-sheet formula references (e.g. =Jan!$C$24)
-    # which suffer the same stale-cache problem as the weekly SUM formulas.
-    # We read the values we just wrote and write numeric values directly.
+    # ── Populate Year Total sheet from Python-calculated totals ──
+    # Never read from formula cells — use the accumulators above.
     yt = wb['Year Total']
     mc = chr(ord('B') + month - 1)  # Jan→B, Feb→C, … Dec→M
 
-    # Interdiction totals (rows 3–12) ← monthly sheet row 24, cols C–L
-    inter_year_rows = {
-        3: 'C', 4: 'D', 5: 'E', 6: 'F', 7: 'G',
-        8: 'H', 9: 'I', 10: 'J', 11: 'K', 12: 'L',
+    # Interdiction stats → Year Total rows 3–12
+    inter_yt = {
+        'drug_seizures': 3, 'criminal_seizures': 4, 'currency_seizures': 5,
+        'training_hours': 6, 'vehicle_searches': 7, 'assist_narc_ops': 8,
+        'traffic_stops': 9, 'warrant_arrests': 10, 'pc_arrests': 11, 'agency_assist': 12,
     }
-    for yt_row, monthly_col in inter_year_rows.items():
-        val = ws[f'{monthly_col}24'].value
-        if val is not None:
+    for stat_key, yt_row in inter_yt.items():
+        val = inter_month.get(stat_key, 0)
+        if val:
             yt[f'{mc}{yt_row}'] = val
 
-    # Uniform totals (rows 21–29) ← monthly sheet row 55, cols D–L
-    uni_year_rows = {
-        21: 'D', 22: 'E', 23: 'F', 24: 'G', 25: 'H',
-        26: 'I', 27: 'J', 28: 'K', 29: 'L',
+    # Uniform stats → Year Total rows 21–29
+    uni_yt = {
+        'k9_deploy': 21, 'tno_cases': 22, 'training_hours': 23, 'surv_hours': 24,
+        'patrol_jail_cases': 25, 'traffic_stops': 26, 'warrant_arrests': 27,
+        'agency_assist': 28, 'supp_reports': 29,
     }
-    for yt_row, monthly_col in uni_year_rows.items():
-        val = ws[f'{monthly_col}55'].value
-        if val is not None:
+    for stat_key, yt_row in uni_yt.items():
+        val = uni_month.get(stat_key, 0)
+        if val:
             yt[f'{mc}{yt_row}'] = val
 
-    # Drug seizure totals (rows 32–38) ← monthly sheet cols N–T
-    # Cocaine (row 33) references monthly row 31; all others reference row 52
-    drug_year_rows = {
-        32: ('N', 52), 33: ('O', 31), 34: ('P', 52),
-        35: ('Q', 52), 36: ('R', 52), 37: ('S', 52), 38: ('T', 52),
+    # Drug totals (all detectives) → Year Total rows 32–38
+    drug_yt = {
+        'meth_g': 32, 'cocaine_g': 33, 'heroin_g': 34, 'fentanyl_g': 35,
+        'marijuana_oz': 36, 'promethazine_codeine_oz': 37, 'rx_pills': 38,
     }
-    for yt_row, (monthly_col, monthly_row) in drug_year_rows.items():
-        val = ws[f'{monthly_col}{monthly_row}'].value
-        if val is not None:
+    for stat_key, yt_row in drug_yt.items():
+        val = drug_month.get(stat_key, 0)
+        if val:
             yt[f'{mc}{yt_row}'] = val
+
+    # ── Debug sheet ──
+    if 'Debug' in wb.sheetnames:
+        del wb['Debug']
+    dbg = wb.create_sheet('Debug')
+    dbg['A1'] = 'Section'
+    dbg['B1'] = 'Year Total cell written'
+    dbg['C1'] = 'Python-calculated value'
+    debug_rows = (
+        [('INFO', f'sheet_names={wb.sheetnames}', f'month_col={mc}')]
+        + [(f'INTER', f'YearTotal!{mc}{r}', repr(inter_month.get(k, 0)))
+           for k, r in inter_yt.items()]
+        + [(f'UNI',   f'YearTotal!{mc}{r}', repr(uni_month.get(k, 0)))
+           for k, r in uni_yt.items()]
+        + [(f'DRUG',  f'YearTotal!{mc}{r}', repr(drug_month.get(k, 0)))
+           for k, r in drug_yt.items()]
+    )
+    for i, (section, dest, value) in enumerate(debug_rows, start=2):
+        dbg.cell(row=i, column=1, value=section)
+        dbg.cell(row=i, column=2, value=dest)
+        dbg.cell(row=i, column=3, value=value)
+    dbg.column_dimensions['A'].width = 10
+    dbg.column_dimensions['B'].width = 30
+    dbg.column_dimensions['C'].width = 30
 
     output = io.BytesIO()
     wb.save(output)
