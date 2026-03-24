@@ -7,13 +7,20 @@ from http.server import BaseHTTPRequestHandler
 import json, os, io, datetime
 from openpyxl import load_workbook
 
-TEMPLATE_PATH = os.path.join(
+UNIFORM_TEMPLATE_PATH = os.path.join(
     os.path.dirname(__file__), '..', 'templates', 'Monthly Uniform 2025 new.xlsx'
 )
+UC_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(__file__), '..', 'templates', 'Monthly UC 2025 new.xlsx'
+)
 
-# ── Sheet names in the template (index 0–11 = Jan–Dec, 12 = Year Total) ──
+# ── Sheet names in the Uniform template (index 0–11 = Jan–Dec, 12 = Year Total) ──
 SHEET_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+# ── Sheet names in the UC template ──
+UC_SHEET_NAMES = ['Jan', 'Feb', 'March', 'April', 'May', 'June',
+                  'July', 'Aug', 'Sept', 'Oct', 'Nov', 'Dec']
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CELL MAPPINGS — derived from studying the template
@@ -79,6 +86,44 @@ UNI_DETECTIVES = {
     'Tamara Spikes': {'stat_weeks': [49, 50, 51, 52, 53], 'drug_weeks': [46, 47, 48, 49, 50]},
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# UC SECTION — separate template: Monthly UC 2025 new.xlsx
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Left side activity stats — columns B through L
+UC_STAT_COLS = {
+    'B': 'hours_worked',
+    'C': 'attempted_operations',
+    'D': 'uc_ci_cases',
+    'E': 'tno_cases',
+    'F': 'sw_cases',
+    'G': 'surv_hours',
+    'H': 'patrol_jail_cases',
+    'I': 'pc_arrests',
+    'J': 'warrant_arrests',
+    'K': 'training_hours',
+    'L': 'detective_agency_assist',
+}
+
+# Right side drug seizures — columns N through T (detective name in column M)
+UC_DRUG_COLS = {
+    'N': 'meth_g',
+    'O': 'cocaine_g',
+    'P': 'heroin_g',
+    'Q': 'fentanyl_g',
+    'R': 'marijuana_oz',
+    'S': 'promethazine_codeine_oz',
+    'T': 'rx_pills',
+}
+
+# Detective name → start_row.  Week rows = start_row+1 … start_row+5, Total = start_row+6.
+UC_DETECTIVES = {
+    'Colton Lowe':    {'start_row': 3},
+    'Layne Verdine':  {'start_row': 10},
+    'Ryan Golmon':    {'start_row': 17},
+    'Matthew Flowers': {'start_row': 24},
+}
+
 
 def get_week_start(date_str):
     """Return the Sunday that starts the week containing date_str."""
@@ -115,7 +160,7 @@ def fill_monthly(month, year, entries):
     Fill the correct month sheet in the template with entry data.
     Returns BytesIO containing the completed .xlsx.
     """
-    wb = load_workbook(TEMPLATE_PATH)
+    wb = load_workbook(UNIFORM_TEMPLATE_PATH)
     sheet_name = SHEET_NAMES[month - 1]
     ws = wb[sheet_name]
 
@@ -252,6 +297,114 @@ def fill_monthly(month, year, entries):
     return output
 
 
+def fill_monthly_uc(month, year, entries):
+    """
+    Fill the UC monthly template for the given month.
+    Returns BytesIO containing the completed .xlsx.
+    """
+    wb = load_workbook(UC_TEMPLATE_PATH)
+    sheet_name = UC_SHEET_NAMES[month - 1]
+    ws = wb[sheet_name]
+
+    week_starts = get_week_starts_for_month(month, year)
+
+    # Build lookup: (user_name, week_start_str) → list of entries
+    week_entries = {}
+    for e in entries:
+        ws_key = e.get('week_start', get_week_start(e['entry_date']).isoformat())
+        key = (e['user_name'], ws_key)
+        week_entries.setdefault(key, []).append(e)
+
+    def sum_stats(entry_list, key):
+        total = 0
+        for e in entry_list:
+            val = e.get('stats', {}).get(key)
+            if val not in (None, '', '0'):
+                try:
+                    total += float(val)
+                except (ValueError, TypeError):
+                    pass
+        return total if total else None
+
+    # Python accumulators for Year Total sheet
+    uc_stat_month = {}
+    uc_drug_month = {}
+
+    def _add(acc, key, val):
+        if val:
+            acc[key] = acc.get(key, 0.0) + val
+
+    # ── Fill each UC detective ──
+    for det_name, det_config in UC_DETECTIVES.items():
+        start = det_config['start_row']
+
+        # Write detective name to column A and M on the name row
+        ws[f'A{start}'] = det_name
+        ws[f'M{start}'] = det_name
+
+        for wi, ws_str in enumerate(week_starts):
+            if wi >= 5:
+                break
+            elist = week_entries.get((det_name, ws_str), [])
+            data_row = start + 1 + wi  # week 1 → start_row+1, etc.
+
+            # Left side stats (B–L)
+            for col_letter, stat_key in UC_STAT_COLS.items():
+                val = sum_stats(elist, stat_key)
+                if val is not None:
+                    ws[f'{col_letter}{data_row}'] = val
+                    _add(uc_stat_month, stat_key, val)
+
+            # Right side drugs (N–T)
+            for col_letter, stat_key in UC_DRUG_COLS.items():
+                val = sum_stats(elist, stat_key)
+                if val is not None:
+                    ws[f'{col_letter}{data_row}'] = val
+                    _add(uc_drug_month, stat_key, val)
+
+    # ── Populate Year Total sheet from Python-calculated totals ──
+    yt = wb['Year Total ']  # NOTE: trailing space in sheet name
+    mc = chr(ord('B') + month - 1)  # Jan→B, Feb→C, … Dec→M
+
+    # Activity stats → Year Total rows 3–12
+    uc_yt_stats = {
+        'attempted_operations': 3,
+        'uc_ci_cases': 4,
+        'tno_cases': 5,
+        'sw_cases': 6,
+        'surv_hours': 7,
+        'patrol_jail_cases': 8,
+        'pc_arrests': 9,
+        'warrant_arrests': 10,
+        'training_hours': 11,
+        'detective_agency_assist': 12,
+    }
+    for stat_key, yt_row in uc_yt_stats.items():
+        val = uc_stat_month.get(stat_key, 0)
+        if val:
+            yt[f'{mc}{yt_row}'] = val
+
+    # Drug seizures → Year Total rows 17–23
+    uc_yt_drugs = {
+        'meth_g': 17,
+        'cocaine_g': 18,
+        'heroin_g': 19,
+        'fentanyl_g': 20,
+        'marijuana_oz': 21,
+        'promethazine_codeine_oz': 22,
+        'rx_pills': 23,
+    }
+    for stat_key, yt_row in uc_yt_drugs.items():
+        val = uc_drug_month.get(stat_key, 0)
+        if val:
+            yt[f'{mc}{yt_row}'] = val
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
@@ -260,15 +413,19 @@ class handler(BaseHTTPRequestHandler):
 
             month = int(body['month'])
             year = int(body['year'])
+            unit = body.get('unit', 'Uniform')
             entries = body.get('entries', [])
 
-            output = fill_monthly(month, year, entries)
+            if unit == 'UC':
+                output = fill_monthly_uc(month, year, entries)
+            else:
+                output = fill_monthly(month, year, entries)
 
             month_names = [
                 '', 'January', 'February', 'March', 'April', 'May', 'June',
                 'July', 'August', 'September', 'October', 'November', 'December',
             ]
-            filename = f'JCSO_Monthly_{month_names[month]}_{year}.xlsx'
+            filename = f'JCSO_Monthly_{unit}_{month_names[month]}_{year}.xlsx'
 
             self.send_response(200)
             self.send_header('Content-Type',

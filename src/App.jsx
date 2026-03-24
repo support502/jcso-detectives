@@ -10,15 +10,15 @@ import {
    ═══════════════════════════════════════════════════════════════════ */
 
 const UC_FIELDS = [
-  { key: 'hours', label: 'Hours' },
+  { key: 'hours_worked', label: 'Hours Worked' },
   { key: 'attempted_operations', label: 'Attempted Operations' },
   { key: 'uc_ci_cases', label: 'UC/CI Cases' },
   { key: 'tno_cases', label: 'TNO Cases' },
   { key: 'sw_cases', label: 'SW Cases' },
   { key: 'surv_hours', label: 'Surv Hours' },
-  { key: 'patrol_cases', label: 'Patrol Cases' },
-  { key: 'pc_arrest', label: 'PC Arrest' },
-  { key: 'warrant_arrest', label: 'Warrant Arrest' },
+  { key: 'patrol_jail_cases', label: 'Patrol/Jail Cases' },
+  { key: 'pc_arrests', label: 'PC Arrests' },
+  { key: 'warrant_arrests', label: 'Warrant Arrests' },
   { key: 'training_hours', label: 'Training Hours' },
   { key: 'detective_agency_assist', label: 'Detective/Agency Assist' },
 ]
@@ -35,6 +35,16 @@ const UNIFORM_FIELDS = [
   { key: 'warrant_arrests', label: 'Warrant Arrests' },
   { key: 'agency_assist', label: 'Agency Assist' },
   { key: 'supp_reports', label: 'Supp Reports' },
+]
+
+const DRUG_FIELDS = [
+  { key: 'meth_g', label: 'Meth (g)' },
+  { key: 'cocaine_g', label: 'Cocaine (g)' },
+  { key: 'heroin_g', label: 'Heroin (g)' },
+  { key: 'fentanyl_g', label: 'Fentanyl (g)' },
+  { key: 'marijuana_oz', label: 'Marijuana (oz)' },
+  { key: 'promethazine_codeine_oz', label: 'Promethazine/Codeine (oz)' },
+  { key: 'rx_pills', label: 'RX Pills (#)' },
 ]
 
 const INTERDICTION_FIELDS = [
@@ -93,6 +103,10 @@ function sumStats(entries, fields) {
 function emptyStats(unit) {
   const stats = {}
   for (const f of UNIT_FIELDS[unit]) stats[f.key] = ''
+  // All units get drug seizure fields (Interdiction already has them inline)
+  if (unit === 'UC' || unit === 'Uniform') {
+    for (const f of DRUG_FIELDS) stats[f.key] = ''
+  }
   return stats
 }
 
@@ -452,6 +466,30 @@ function EntryForm({ user }) {
           ))}
         </div>
       </div>
+
+      {/* Drug seizure fields for UC and Uniform (Interdiction has them inline) */}
+      {(user.unit === 'UC' || user.unit === 'Uniform') && (
+        <div style={card}>
+          <h3 style={{ margin: '0 0 16px', color: s.navy, fontSize: 16 }}>
+            Drug Seizures
+          </h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+            {DRUG_FIELDS.map(f => (
+              <div key={f.key}>
+                <label style={label}>{f.label}</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={stats[f.key] ?? ''}
+                  onChange={e => updateStat(f.key, e.target.value)}
+                  style={input}
+                  placeholder="0"
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Case numbers & notes */}
       <div style={card}>
@@ -910,7 +948,7 @@ function WeeklyDetailView({ detectives }) {
    10. SUPERVISOR — Monthly Report (XLSX export)
    ═══════════════════════════════════════════════════════════════════ */
 
-function MonthlyReport({ detectives }) {
+function MonthlyExportCard({ unit, title, description }) {
   const [month, setMonth] = useState(new Date().getMonth() + 1)
   const [year, setYear] = useState(new Date().getFullYear())
   const [generating, setGenerating] = useState(false)
@@ -918,24 +956,18 @@ function MonthlyReport({ detectives }) {
   async function generateReport() {
     setGenerating(true)
     try {
-      // Fetch all entries for the selected month from Supabase
       const entries = await fetchMonthEntries(month, year)
-
-      // Send entries to the API which fills the real Excel template
       const res = await fetch('/api/monthly', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ month, year, entries }),
+        body: JSON.stringify({ month, year, unit, entries }),
       })
-
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.error || `Server error ${res.status}`)
       }
-
-      // Download the returned xlsx file
       const blob = await res.blob()
-      const fileName = `JCSO_Monthly_${MONTH_NAMES[month]}_${year}.xlsx`
+      const fileName = `JCSO_Monthly_${unit}_${MONTH_NAMES[month]}_${year}.xlsx`
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -950,7 +982,7 @@ function MonthlyReport({ detectives }) {
 
   return (
     <div style={card}>
-      <h3 style={{ margin: '0 0 16px', color: s.navy }}>Monthly XLSX Report</h3>
+      <h3 style={{ margin: '0 0 16px', color: s.navy }}>{title}</h3>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
         <div>
           <label style={label}>Month</label>
@@ -966,10 +998,24 @@ function MonthlyReport({ detectives }) {
           {generating ? 'Generating...' : 'Download XLSX'}
         </button>
       </div>
-      <p style={{ margin: '12px 0 0', fontSize: 13, color: s.gray500 }}>
-        Generates a report matching the existing Excel layout — Interdiction, Uniform, and UC sections
-        with weekly breakdowns per detective, plus a Year Total sheet.
-      </p>
+      <p style={{ margin: '12px 0 0', fontSize: 13, color: s.gray500 }}>{description}</p>
+    </div>
+  )
+}
+
+function MonthlyReport() {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 16 }}>
+      <MonthlyExportCard
+        unit="Uniform"
+        title="Uniform / Interdiction Monthly"
+        description="Exports Uniform & Interdiction sections with weekly breakdowns per detective, plus Year Total sheet."
+      />
+      <MonthlyExportCard
+        unit="UC"
+        title="UC Monthly"
+        description="Exports UC section with weekly breakdowns per detective, plus Year Total sheet."
+      />
     </div>
   )
 }
@@ -997,7 +1043,7 @@ function SupervisorView({ detectives }) {
 
       {tab === 'dashboard' && <Dashboard detectives={detectives} />}
       {tab === 'weekly' && <WeeklyDetailView detectives={detectives} />}
-      {tab === 'report' && <MonthlyReport detectives={detectives} />}
+      {tab === 'report' && <MonthlyReport />}
     </div>
   )
 }
