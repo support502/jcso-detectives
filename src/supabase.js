@@ -133,14 +133,15 @@ export async function fetchAllEntries(filters = {}) {
   return data
 }
 
-// Fetch entries for a specific month/year (for monthly report)
+// Fetch entries for a specific month/year, or all months in a year if month is null
 export async function fetchMonthEntries(month, year) {
-  const { data, error } = await supabase
+  let query = supabase
     .from('det_entries')
     .select('*')
-    .eq('month', month)
     .eq('year', year)
     .order('entry_date')
+  if (month) query = query.eq('month', month)
+  const { data, error } = await query
   if (error) throw error
   return data
 }

@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"import py_compile; py_compile.compile\\(''api/monthly.py'', doraise=True\\)\")"
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''api/monthly.py'', doraise=True\\)\")",
+      "Bash(npx -y acorn --ecma2020 --module --jsx src/App.jsx)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

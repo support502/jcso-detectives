@@ -155,141 +155,143 @@ def get_week_starts_for_month(month, year):
     return weeks[:5]
 
 
-def fill_monthly(month, year, entries):
-    """
-    Fill the correct month sheet in the template with entry data.
-    Returns BytesIO containing the completed .xlsx.
-    """
-    wb = load_workbook(UNIFORM_TEMPLATE_PATH)
-    sheet_name = SHEET_NAMES[month - 1]
-    ws = wb[sheet_name]
+# ═══════════════════════════════════════════════════════════════════════════
+# Year Total row mappings (Uniform template)
+# ═══════════════════════════════════════════════════════════════════════════
+INTER_YT = {
+    'drug_seizures': 3, 'criminal_seizures': 4, 'currency_seizures': 5,
+    'training_hours': 6, 'vehicle_searches': 7, 'assist_narc_ops': 8,
+    'traffic_stops': 9, 'warrant_arrests': 10, 'pc_arrests': 11, 'agency_assist': 12,
+}
+UNI_YT = {
+    'k9_deploy': 21, 'tno_cases': 22, 'training_hours': 23, 'surv_hours': 24,
+    'patrol_jail_cases': 25, 'traffic_stops': 26, 'warrant_arrests': 27,
+    'agency_assist': 28, 'supp_reports': 29,
+}
+DRUG_YT = {
+    'meth_g': 32, 'cocaine_g': 33, 'heroin_g': 34, 'fentanyl_g': 35,
+    'marijuana_oz': 36, 'promethazine_codeine_oz': 37, 'rx_pills': 38,
+}
 
-    week_starts = get_week_starts_for_month(month, year)
+# ═══════════════════════════════════════════════════════════════════════════
+# Year Total row mappings (UC template)
+# ═══════════════════════════════════════════════════════════════════════════
+UC_YT_STATS = {
+    'attempted_operations': 3, 'uc_ci_cases': 4, 'tno_cases': 5,
+    'sw_cases': 6, 'surv_hours': 7, 'patrol_jail_cases': 8,
+    'pc_arrests': 9, 'warrant_arrests': 10, 'training_hours': 11,
+    'detective_agency_assist': 12,
+}
+UC_YT_DRUGS = {
+    'meth_g': 17, 'cocaine_g': 18, 'heroin_g': 19, 'fentanyl_g': 20,
+    'marijuana_oz': 21, 'promethazine_codeine_oz': 22, 'rx_pills': 23,
+}
 
-    # Build lookup: (user_name, week_start_str) → list of entries
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Shared helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _sum_stats(entry_list, key):
+    """Sum a single stat key across a list of entries."""
+    total = 0
+    for e in entry_list:
+        val = e.get('stats', {}).get(key)
+        if val not in (None, '', '0'):
+            try:
+                total += float(val)
+            except (ValueError, TypeError):
+                pass
+    return total if total else None
+
+
+def _add(acc, key, val):
+    if val:
+        acc[key] = acc.get(key, 0.0) + val
+
+
+def _build_week_entries(entries):
+    """Build lookup: (user_name, week_start_str) → list of entries."""
     week_entries = {}
     for e in entries:
         ws_key = e.get('week_start', get_week_start(e['entry_date']).isoformat())
         key = (e['user_name'], ws_key)
         week_entries.setdefault(key, []).append(e)
+    return week_entries
 
-    def sum_stats(entry_list, key):
-        """Sum a single stat key across a list of entries."""
-        total = 0
-        for e in entry_list:
-            val = e.get('stats', {}).get(key)
-            if val not in (None, '', '0'):
-                try:
-                    total += float(val)
-                except (ValueError, TypeError):
-                    pass
-        return total if total else None
 
-    # ── Python-calculated monthly totals (never read from formula cells) ──
-    # Accumulated while filling week rows; written directly to Year Total sheet.
-    inter_month = {}   # stat_key → float total across all interdiction detectives
-    uni_month   = {}   # stat_key → float total across all uniform detectives
-    drug_month  = {}   # stat_key → float total across ALL detectives (both units)
+# ═══════════════════════════════════════════════════════════════════════════
+# Uniform/Interdiction — fill a single month sheet on a workbook
+# Returns (inter_month_acc, uni_month_acc, drug_month_acc)
+# ═══════════════════════════════════════════════════════════════════════════
 
-    def _add(acc, key, val):
-        if val:
-            acc[key] = acc.get(key, 0.0) + val
+def _fill_uniform_month_sheet(wb, month, year, entries):
+    """Fill one month sheet in the Uniform template. Returns accumulators."""
+    sheet_name = SHEET_NAMES[month - 1]
+    ws = wb[sheet_name]
+    week_starts = get_week_starts_for_month(month, year)
+    week_entries = _build_week_entries(entries)
+
+    inter_month = {}
+    uni_month = {}
+    drug_month = {}
 
     def fill_detective(det_name, det_config, stat_cols, drug_cols=None,
                        stat_acc=None, drug_acc=None):
-        """Fill week rows for one detective and accumulate monthly totals."""
         for wi, ws_str in enumerate(week_starts):
             if wi >= 5:
                 break
             elist = week_entries.get((det_name, ws_str), [])
-
             stat_row = det_config['stat_weeks'][wi]
             for col_letter, stat_key in stat_cols.items():
-                val = sum_stats(elist, stat_key)
+                val = _sum_stats(elist, stat_key)
                 if val is not None:
                     ws[f'{col_letter}{stat_row}'] = val
                     if stat_acc is not None:
                         _add(stat_acc, stat_key, val)
-
             if drug_cols:
                 drug_row = det_config['drug_weeks'][wi]
                 for col_letter, stat_key in drug_cols.items():
-                    val = sum_stats(elist, stat_key)
+                    val = _sum_stats(elist, stat_key)
                     if val is not None:
                         ws[f'{col_letter}{drug_row}'] = val
                         if drug_acc is not None:
                             _add(drug_acc, stat_key, val)
 
-    # ── Fill Interdiction detectives ──
     for det_name, config in INTER_DETECTIVES.items():
         fill_detective(det_name, config, INTER_STAT_COLS, INTER_DRUG_COLS,
                        stat_acc=inter_month, drug_acc=drug_month)
-
-    # ── Fill Uniform detectives ──
     for det_name, config in UNI_DETECTIVES.items():
         fill_detective(det_name, config, UNI_STAT_COLS, INTER_DRUG_COLS,
                        stat_acc=uni_month, drug_acc=drug_month)
 
-    # ── Populate Year Total sheet from Python-calculated totals ──
-    # Never read from formula cells — use the accumulators above.
-    yt = wb['Year Total']
-    mc = chr(ord('B') + month - 1)  # Jan→B, Feb→C, … Dec→M
+    return inter_month, uni_month, drug_month
 
-    # Interdiction stats → Year Total rows 3–12
-    inter_yt = {
-        'drug_seizures': 3, 'criminal_seizures': 4, 'currency_seizures': 5,
-        'training_hours': 6, 'vehicle_searches': 7, 'assist_narc_ops': 8,
-        'traffic_stops': 9, 'warrant_arrests': 10, 'pc_arrests': 11, 'agency_assist': 12,
-    }
-    for stat_key, yt_row in inter_yt.items():
+
+def _write_uniform_year_total(wb, month, inter_month, uni_month, drug_month):
+    """Write one month column to the Year Total sheet (Uniform template)."""
+    yt = wb['Year Total']
+    mc = chr(ord('B') + month - 1)
+    for stat_key, yt_row in INTER_YT.items():
         val = inter_month.get(stat_key, 0)
         if val:
             yt[f'{mc}{yt_row}'] = val
-
-    # Uniform stats → Year Total rows 21–29
-    uni_yt = {
-        'k9_deploy': 21, 'tno_cases': 22, 'training_hours': 23, 'surv_hours': 24,
-        'patrol_jail_cases': 25, 'traffic_stops': 26, 'warrant_arrests': 27,
-        'agency_assist': 28, 'supp_reports': 29,
-    }
-    for stat_key, yt_row in uni_yt.items():
+    for stat_key, yt_row in UNI_YT.items():
         val = uni_month.get(stat_key, 0)
         if val:
             yt[f'{mc}{yt_row}'] = val
-
-    # Drug totals (all detectives) → Year Total rows 32–38
-    drug_yt = {
-        'meth_g': 32, 'cocaine_g': 33, 'heroin_g': 34, 'fentanyl_g': 35,
-        'marijuana_oz': 36, 'promethazine_codeine_oz': 37, 'rx_pills': 38,
-    }
-    for stat_key, yt_row in drug_yt.items():
+    for stat_key, yt_row in DRUG_YT.items():
         val = drug_month.get(stat_key, 0)
         if val:
             yt[f'{mc}{yt_row}'] = val
 
-    # ── Debug sheet ──
-    if 'Debug' in wb.sheetnames:
-        del wb['Debug']
-    dbg = wb.create_sheet('Debug')
-    dbg['A1'] = 'Section'
-    dbg['B1'] = 'Year Total cell written'
-    dbg['C1'] = 'Python-calculated value'
-    debug_rows = (
-        [('INFO', f'sheet_names={wb.sheetnames}', f'month_col={mc}')]
-        + [(f'INTER', f'YearTotal!{mc}{r}', repr(inter_month.get(k, 0)))
-           for k, r in inter_yt.items()]
-        + [(f'UNI',   f'YearTotal!{mc}{r}', repr(uni_month.get(k, 0)))
-           for k, r in uni_yt.items()]
-        + [(f'DRUG',  f'YearTotal!{mc}{r}', repr(drug_month.get(k, 0)))
-           for k, r in drug_yt.items()]
-    )
-    for i, (section, dest, value) in enumerate(debug_rows, start=2):
-        dbg.cell(row=i, column=1, value=section)
-        dbg.cell(row=i, column=2, value=dest)
-        dbg.cell(row=i, column=3, value=value)
-    dbg.column_dimensions['A'].width = 10
-    dbg.column_dimensions['B'].width = 30
-    dbg.column_dimensions['C'].width = 30
+
+def fill_monthly(month, year, entries):
+    """Fill a single month sheet + its Year Total column. Returns BytesIO."""
+    wb = load_workbook(UNIFORM_TEMPLATE_PATH)
+    inter_month, uni_month, drug_month = _fill_uniform_month_sheet(
+        wb, month, year, entries)
+    _write_uniform_year_total(wb, month, inter_month, uni_month, drug_month)
 
     output = io.BytesIO()
     wb.save(output)
@@ -297,48 +299,43 @@ def fill_monthly(month, year, entries):
     return output
 
 
-def fill_monthly_uc(month, year, entries):
+def fill_yearly(year, entries_by_month):
     """
-    Fill the UC monthly template for the given month.
-    Returns BytesIO containing the completed .xlsx.
+    Fill ALL 12 month sheets + full Year Total (Uniform template).
+    entries_by_month: dict {month_int: [entries]}
     """
-    wb = load_workbook(UC_TEMPLATE_PATH)
+    wb = load_workbook(UNIFORM_TEMPLATE_PATH)
+    for m in range(1, 13):
+        month_entries = entries_by_month.get(m, [])
+        if not month_entries:
+            continue
+        inter_m, uni_m, drug_m = _fill_uniform_month_sheet(
+            wb, m, year, month_entries)
+        _write_uniform_year_total(wb, m, inter_m, uni_m, drug_m)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UC — fill a single month sheet on a workbook
+# Returns (uc_stat_acc, uc_drug_acc)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _fill_uc_month_sheet(wb, month, year, entries):
+    """Fill one month sheet in the UC template. Returns accumulators."""
     sheet_name = UC_SHEET_NAMES[month - 1]
     ws = wb[sheet_name]
-
     week_starts = get_week_starts_for_month(month, year)
+    week_entries = _build_week_entries(entries)
 
-    # Build lookup: (user_name, week_start_str) → list of entries
-    week_entries = {}
-    for e in entries:
-        ws_key = e.get('week_start', get_week_start(e['entry_date']).isoformat())
-        key = (e['user_name'], ws_key)
-        week_entries.setdefault(key, []).append(e)
-
-    def sum_stats(entry_list, key):
-        total = 0
-        for e in entry_list:
-            val = e.get('stats', {}).get(key)
-            if val not in (None, '', '0'):
-                try:
-                    total += float(val)
-                except (ValueError, TypeError):
-                    pass
-        return total if total else None
-
-    # Python accumulators for Year Total sheet
     uc_stat_month = {}
     uc_drug_month = {}
 
-    def _add(acc, key, val):
-        if val:
-            acc[key] = acc.get(key, 0.0) + val
-
-    # ── Fill each UC detective ──
     for det_name, det_config in UC_DETECTIVES.items():
         start = det_config['start_row']
-
-        # Write detective name to column A and M on the name row
         ws[f'A{start}'] = det_name
         ws[f'M{start}'] = det_name
 
@@ -346,58 +343,61 @@ def fill_monthly_uc(month, year, entries):
             if wi >= 5:
                 break
             elist = week_entries.get((det_name, ws_str), [])
-            data_row = start + 1 + wi  # week 1 → start_row+1, etc.
+            data_row = start + 1 + wi
 
-            # Left side stats (B–L)
             for col_letter, stat_key in UC_STAT_COLS.items():
-                val = sum_stats(elist, stat_key)
+                val = _sum_stats(elist, stat_key)
                 if val is not None:
                     ws[f'{col_letter}{data_row}'] = val
                     _add(uc_stat_month, stat_key, val)
 
-            # Right side drugs (N–T)
             for col_letter, stat_key in UC_DRUG_COLS.items():
-                val = sum_stats(elist, stat_key)
+                val = _sum_stats(elist, stat_key)
                 if val is not None:
                     ws[f'{col_letter}{data_row}'] = val
                     _add(uc_drug_month, stat_key, val)
 
-    # ── Populate Year Total sheet from Python-calculated totals ──
-    yt = wb['Year Total ']  # NOTE: trailing space in sheet name
-    mc = chr(ord('B') + month - 1)  # Jan→B, Feb→C, … Dec→M
+    return uc_stat_month, uc_drug_month
 
-    # Activity stats → Year Total rows 3–12
-    uc_yt_stats = {
-        'attempted_operations': 3,
-        'uc_ci_cases': 4,
-        'tno_cases': 5,
-        'sw_cases': 6,
-        'surv_hours': 7,
-        'patrol_jail_cases': 8,
-        'pc_arrests': 9,
-        'warrant_arrests': 10,
-        'training_hours': 11,
-        'detective_agency_assist': 12,
-    }
-    for stat_key, yt_row in uc_yt_stats.items():
+
+def _write_uc_year_total(wb, month, uc_stat_month, uc_drug_month):
+    """Write one month column to the Year Total sheet (UC template)."""
+    yt = wb['Year Total ']  # NOTE: trailing space
+    mc = chr(ord('B') + month - 1)
+    for stat_key, yt_row in UC_YT_STATS.items():
         val = uc_stat_month.get(stat_key, 0)
         if val:
             yt[f'{mc}{yt_row}'] = val
-
-    # Drug seizures → Year Total rows 17–23
-    uc_yt_drugs = {
-        'meth_g': 17,
-        'cocaine_g': 18,
-        'heroin_g': 19,
-        'fentanyl_g': 20,
-        'marijuana_oz': 21,
-        'promethazine_codeine_oz': 22,
-        'rx_pills': 23,
-    }
-    for stat_key, yt_row in uc_yt_drugs.items():
+    for stat_key, yt_row in UC_YT_DRUGS.items():
         val = uc_drug_month.get(stat_key, 0)
         if val:
             yt[f'{mc}{yt_row}'] = val
+
+
+def fill_monthly_uc(month, year, entries):
+    """Fill a single month sheet + its Year Total column (UC). Returns BytesIO."""
+    wb = load_workbook(UC_TEMPLATE_PATH)
+    uc_stat, uc_drug = _fill_uc_month_sheet(wb, month, year, entries)
+    _write_uc_year_total(wb, month, uc_stat, uc_drug)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
+def fill_yearly_uc(year, entries_by_month):
+    """
+    Fill ALL 12 month sheets + full Year Total (UC template).
+    entries_by_month: dict {month_int: [entries]}
+    """
+    wb = load_workbook(UC_TEMPLATE_PATH)
+    for m in range(1, 13):
+        month_entries = entries_by_month.get(m, [])
+        if not month_entries:
+            continue
+        uc_stat, uc_drug = _fill_uc_month_sheet(wb, m, year, month_entries)
+        _write_uc_year_total(wb, m, uc_stat, uc_drug)
 
     output = io.BytesIO()
     wb.save(output)
@@ -411,21 +411,33 @@ class handler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(content_length))
 
-            month = int(body['month'])
             year = int(body['year'])
             unit = body.get('unit', 'Uniform')
-            entries = body.get('entries', [])
-
-            if unit == 'UC':
-                output = fill_monthly_uc(month, year, entries)
-            else:
-                output = fill_monthly(month, year, entries)
+            export_type = body.get('export_type', 'month')
 
             month_names = [
                 '', 'January', 'February', 'March', 'April', 'May', 'June',
                 'July', 'August', 'September', 'October', 'November', 'December',
             ]
-            filename = f'JCSO_Monthly_{unit}_{month_names[month]}_{year}.xlsx'
+
+            if export_type == 'year':
+                # entries_by_month: dict {month_int: [entries]}
+                entries_by_month = body.get('entries_by_month', {})
+                # Convert string keys to int (JSON keys are strings)
+                entries_by_month = {int(k): v for k, v in entries_by_month.items()}
+                if unit == 'UC':
+                    output = fill_yearly_uc(year, entries_by_month)
+                else:
+                    output = fill_yearly(year, entries_by_month)
+                filename = f'JCSO_Yearly_{unit}_{year}.xlsx'
+            else:
+                month = int(body['month'])
+                entries = body.get('entries', [])
+                if unit == 'UC':
+                    output = fill_monthly_uc(month, year, entries)
+                else:
+                    output = fill_monthly(month, year, entries)
+                filename = f'JCSO_Monthly_{unit}_{month_names[month]}_{year}.xlsx'
 
             self.send_response(200)
             self.send_header('Content-Type',

@@ -311,6 +311,7 @@ function EntryForm({ user }) {
   const [caseNumbers, setCaseNumbers] = useState('')
   const [notes, setNotes] = useState('')
   const [saving, setSaving] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [message, setMessage] = useState('')
   const [existingId, setExistingId] = useState(null)
 
@@ -378,6 +379,45 @@ function EntryForm({ user }) {
     setSaving(false)
   }
 
+  async function handleExportMyWeekly() {
+    setExporting(true)
+    try {
+      const weekEntries = await fetchEntriesRange(user.id, weekStart, weekDates[6])
+      const payload = {
+        unit: user.unit,
+        detective_name: user.name,
+        week_start: weekStart,
+        entries: weekEntries.map(e => ({
+          entry_date: e.entry_date,
+          stats: e.stats || {},
+          notes: e.notes || '',
+          case_numbers: e.case_numbers || '',
+        })),
+      }
+      const res = await fetch('/api/weekly', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || `Server error ${res.status}`)
+      }
+      const blob = await res.blob()
+      const lastName = user.name.split(' ').pop()
+      const fileName = `${lastName}Week${weekStart.replace(/-/g, '')}.xlsx`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      alert('Export failed: ' + err.message)
+    }
+    setExporting(false)
+  }
+
   // Short day labels for tabs
   const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -401,6 +441,9 @@ function EntryForm({ user }) {
               Today
             </button>
           )}
+          <button onClick={handleExportMyWeekly} disabled={exporting} style={{ ...btnPrimary, padding: '6px 14px', fontSize: 13 }}>
+            {exporting ? 'Exporting...' : 'Export Weekly'}
+          </button>
         </div>
 
         {/* Day tabs — 7 buttons across, scrollable on small screens */}
@@ -686,103 +729,132 @@ function DetectiveView({ user }) {
    8. SUPERVISOR — Dashboard
    ═══════════════════════════════════════════════════════════════════ */
 
-function Dashboard({ detectives }) {
+// Roster by unit — fixed order for the dashboard grid
+const UNIT_ROSTER = {
+  Uniform: ['Brian Chowns', 'Scott Weaver', 'Tamara Spikes', 'William Crain'],
+  Interdiction: ['Jake Droddy', 'Brigitte Morse'],
+  UC: ['Colton Lowe', 'Layne Verdine', 'Ryan Golmon', 'Matthew Flowers'],
+}
+
+// Compute up to 5 week-start Sundays that overlap a given month
+function getWeekStartsForMonth(month, year) {
+  const first = new Date(year, month - 1, 1)
+  // Sunday on or before the 1st
+  const offset = first.getDay() // 0=Sun
+  const start = new Date(first)
+  start.setDate(start.getDate() - offset)
+
+  const lastDay = new Date(year, month, 0) // last day of month
+  const weeks = []
+  const cur = new Date(start)
+  while (weeks.length < 6) {
+    const weekEnd = new Date(cur)
+    weekEnd.setDate(weekEnd.getDate() + 6)
+    if ((cur.getMonth() + 1 === month && cur.getFullYear() === year) ||
+        (weekEnd.getMonth() + 1 === month && weekEnd.getFullYear() === year)) {
+      weeks.push(cur.toISOString().split('T')[0])
+    }
+    cur.setDate(cur.getDate() + 7)
+    if (cur > new Date(lastDay.getTime() + 7 * 86400000)) break
+  }
+  return weeks.slice(0, 5)
+}
+
+function SubmissionGrid({ title, names, weekStarts, entrySet }) {
+  return (
+    <div style={card}>
+      <h3 style={{ margin: '0 0 16px', color: s.navy, fontSize: 16 }}>{title}</h3>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={{ ...th, minWidth: 140 }}>Detective</th>
+              {weekStarts.map((_, i) => (
+                <th key={i} style={{ ...th, textAlign: 'center', minWidth: 70 }}>Wk {i + 1}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {names.map((name, ri) => (
+              <tr key={name} style={{ background: ri % 2 === 0 ? s.white : s.gray100 }}>
+                <td style={{ ...td, fontWeight: 600, color: s.navy }}>{name}</td>
+                {weekStarts.map((ws, wi) => {
+                  const has = entrySet.has(`${name}::${ws}`)
+                  return (
+                    <td key={wi} style={{ ...td, textAlign: 'center', fontSize: 18 }}>
+                      {has
+                        ? <span style={{ color: s.green }}>&#10003;</span>
+                        : <span style={{ color: s.gray300 }}>—</span>}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function Dashboard() {
+  const [month, setMonth] = useState(new Date().getMonth() + 1)
+  const [year, setYear] = useState(new Date().getFullYear())
   const [entries, setEntries] = useState([])
   const [loading, setLoading] = useState(true)
-  const [filterUnit, setFilterUnit] = useState('')
-  const [filterUser, setFilterUser] = useState('')
-  const [filterMonth, setFilterMonth] = useState('')
-  const [filterYear, setFilterYear] = useState(String(new Date().getFullYear()))
 
   useEffect(() => {
-    const filters = {}
-    if (filterUnit) filters.unit = filterUnit
-    if (filterUser) filters.user_id = filterUser
-    if (filterMonth) filters.month = Number(filterMonth)
-    if (filterYear) filters.year = Number(filterYear)
     setLoading(true)
-    fetchAllEntries(filters).then(data => {
+    fetchMonthEntries(month, year).then(data => {
       setEntries(data)
       setLoading(false)
     })
-  }, [filterUnit, filterUser, filterMonth, filterYear])
+  }, [month, year])
 
-  // Get unique units from detectives (not supervisors)
-  const units = [...new Set(detectives.filter(d => d.role !== 'supervisor').map(d => d.unit))]
+  const weekStarts = useMemo(() => getWeekStartsForMonth(month, year), [month, year])
+
+  // Build a Set of "detective_name::week_start" for O(1) lookup
+  const entrySet = useMemo(() => {
+    const set = new Set()
+    for (const e of entries) {
+      // Determine which week_start this entry belongs to
+      const ws = e.week_start || getWeekStart(e.entry_date)
+      // Only count if this week_start is one of the month's weeks
+      if (weekStarts.includes(ws)) {
+        set.add(`${e.user_name}::${ws}`)
+      }
+    }
+    return set
+  }, [entries, weekStarts])
 
   return (
     <div>
-      {/* Filters */}
+      {/* Month/Year picker */}
       <div style={{ ...card, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div>
-          <label style={label}>Unit</label>
-          <select value={filterUnit} onChange={e => setFilterUnit(e.target.value)} style={{ ...input, width: 150 }}>
-            <option value="">All Units</option>
-            {units.map(u => <option key={u} value={u}>{u}</option>)}
-          </select>
-        </div>
-        <div>
-          <label style={label}>Detective</label>
-          <select value={filterUser} onChange={e => setFilterUser(e.target.value)} style={{ ...input, width: 200 }}>
-            <option value="">All Detectives</option>
-            {detectives.filter(d => d.role !== 'supervisor').filter(d => !filterUnit || d.unit === filterUnit).map(d => (
-              <option key={d.id} value={d.id}>{d.name}</option>
-            ))}
-          </select>
-        </div>
-        <div>
           <label style={label}>Month</label>
-          <select value={filterMonth} onChange={e => setFilterMonth(e.target.value)} style={{ ...input, width: 140 }}>
-            <option value="">All Months</option>
+          <select value={month} onChange={e => setMonth(Number(e.target.value))} style={{ ...input, width: 150 }}>
             {MONTH_NAMES.slice(1).map((m, i) => <option key={i + 1} value={i + 1}>{m}</option>)}
           </select>
         </div>
         <div>
           <label style={label}>Year</label>
-          <input type="number" value={filterYear} onChange={e => setFilterYear(e.target.value)} style={{ ...input, width: 100 }} />
+          <input type="number" value={year} onChange={e => setYear(Number(e.target.value))} style={{ ...input, width: 100 }} />
         </div>
       </div>
 
-      {/* Results table */}
-      <div style={{ ...card, overflow: 'auto' }}>
-        {loading ? (
-          <p style={{ color: s.gray500 }}>Loading...</p>
-        ) : entries.length === 0 ? (
-          <p style={{ color: s.gray500 }}>No entries match the filters.</p>
-        ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                <th style={th}>Date</th>
-                <th style={th}>Detective</th>
-                <th style={th}>Unit</th>
-                <th style={th}>Notes</th>
-                <th style={th}>Submitted</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map(e => (
-                <tr key={e.id || e.entry_date + e.user_id}>
-                  <td style={td}>{formatDate(e.entry_date)}</td>
-                  <td style={{ ...td, fontWeight: 600 }}>{e.user_name}</td>
-                  <td style={td}>
-                    <span style={{
-                      background: s.amberLight, color: s.navy, padding: '2px 8px',
-                      borderRadius: 4, fontSize: 12, fontWeight: 600,
-                    }}>{e.unit}</span>
-                  </td>
-                  <td style={{ ...td, maxWidth: 250, whiteSpace: 'normal', fontSize: 13, color: s.gray500 }}>
-                    {e.notes || '—'}
-                  </td>
-                  <td style={{ ...td, fontSize: 12, color: s.gray500 }}>
-                    {e.submitted_at ? new Date(e.submitted_at).toLocaleString() : '—'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {loading ? (
+        <p style={{ color: s.gray500, padding: 12 }}>Loading...</p>
+      ) : (
+        <>
+          <SubmissionGrid title="Uniform Detectives" names={UNIT_ROSTER.Uniform} weekStarts={weekStarts} entrySet={entrySet} />
+          <SubmissionGrid title="Interdiction" names={UNIT_ROSTER.Interdiction} weekStarts={weekStarts} entrySet={entrySet} />
+          <SubmissionGrid title="Undercover Detectives" names={UNIT_ROSTER.UC} weekStarts={weekStarts} entrySet={entrySet} />
+        </>
+      )}
+
+      {/* Monthly export cards */}
+      <MonthlyReport />
     </div>
   )
 }
@@ -951,33 +1023,64 @@ function WeeklyDetailView({ detectives }) {
 function MonthlyExportCard({ unit, title, description }) {
   const [month, setMonth] = useState(new Date().getMonth() + 1)
   const [year, setYear] = useState(new Date().getFullYear())
-  const [generating, setGenerating] = useState(false)
+  const [generatingMonth, setGeneratingMonth] = useState(false)
+  const [generatingYear, setGeneratingYear] = useState(false)
 
-  async function generateReport() {
-    setGenerating(true)
+  async function downloadBlob(res, fileName) {
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  async function exportMonth() {
+    setGeneratingMonth(true)
     try {
       const entries = await fetchMonthEntries(month, year)
       const res = await fetch('/api/monthly', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ month, year, unit, entries }),
+        body: JSON.stringify({ month, year, unit, export_type: 'month', entries }),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.error || `Server error ${res.status}`)
       }
-      const blob = await res.blob()
-      const fileName = `JCSO_Monthly_${unit}_${MONTH_NAMES[month]}_${year}.xlsx`
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = fileName
-      a.click()
-      URL.revokeObjectURL(url)
+      await downloadBlob(res, `JCSO_Monthly_${unit}_${MONTH_NAMES[month]}_${year}.xlsx`)
     } catch (err) {
       alert('Error generating report: ' + err.message)
     }
-    setGenerating(false)
+    setGeneratingMonth(false)
+  }
+
+  async function exportYear() {
+    setGeneratingYear(true)
+    try {
+      // Fetch all 12 months of entries and group by month
+      const allEntries = await fetchMonthEntries(null, year)
+      const entriesByMonth = {}
+      for (const e of allEntries) {
+        const m = e.month
+        if (!entriesByMonth[m]) entriesByMonth[m] = []
+        entriesByMonth[m].push(e)
+      }
+      const res = await fetch('/api/monthly', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ year, unit, export_type: 'year', entries_by_month: entriesByMonth }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || `Server error ${res.status}`)
+      }
+      await downloadBlob(res, `JCSO_Yearly_${unit}_${year}.xlsx`)
+    } catch (err) {
+      alert('Error generating report: ' + err.message)
+    }
+    setGeneratingYear(false)
   }
 
   return (
@@ -994,8 +1097,11 @@ function MonthlyExportCard({ unit, title, description }) {
           <label style={label}>Year</label>
           <input type="number" value={year} onChange={e => setYear(Number(e.target.value))} style={{ ...input, width: 100 }} />
         </div>
-        <button onClick={generateReport} disabled={generating} style={btnPrimary}>
-          {generating ? 'Generating...' : 'Download XLSX'}
+        <button onClick={exportMonth} disabled={generatingMonth || generatingYear} style={btnPrimary}>
+          {generatingMonth ? 'Exporting...' : 'Export Month'}
+        </button>
+        <button onClick={exportYear} disabled={generatingMonth || generatingYear} style={btnPrimary}>
+          {generatingYear ? 'Exporting...' : 'Export Year'}
         </button>
       </div>
       <p style={{ margin: '12px 0 0', fontSize: 13, color: s.gray500 }}>{description}</p>
@@ -1033,7 +1139,6 @@ function SupervisorView({ detectives }) {
         {[
           { key: 'dashboard', label: 'Dashboard' },
           { key: 'weekly', label: 'Weekly View' },
-          { key: 'report', label: 'Monthly Report' },
         ].map(t => (
           <button key={t.key} style={btnTab(tab === t.key)} onClick={() => setTab(t.key)}>
             {t.label}
@@ -1041,9 +1146,8 @@ function SupervisorView({ detectives }) {
         ))}
       </div>
 
-      {tab === 'dashboard' && <Dashboard detectives={detectives} />}
+      {tab === 'dashboard' && <Dashboard />}
       {tab === 'weekly' && <WeeklyDetailView detectives={detectives} />}
-      {tab === 'report' && <MonthlyReport />}
     </div>
   )
 }
