@@ -59,13 +59,6 @@ const INTERDICTION_FIELDS = [
   { key: 'warrant_arrests', label: 'Warrant Arrests' },
   { key: 'pc_arrests', label: 'PC Arrests' },
   { key: 'agency_assist', label: 'Agency Assist' },
-  { key: 'meth_g', label: 'Meth (g)' },
-  { key: 'cocaine_g', label: 'Cocaine (g)' },
-  { key: 'heroin_g', label: 'Heroin (g)' },
-  { key: 'fentanyl_g', label: 'Fentanyl (g)' },
-  { key: 'marijuana_oz', label: 'Marijuana (oz)' },
-  { key: 'promethazine_codeine_oz', label: 'Promethazine/Codeine (oz)' },
-  { key: 'rx_pills', label: 'RX Pills (#)' },
 ]
 
 // Map unit name → field definitions
@@ -103,10 +96,8 @@ function sumStats(entries, fields) {
 function emptyStats(unit) {
   const stats = {}
   for (const f of UNIT_FIELDS[unit]) stats[f.key] = ''
-  // All units get drug seizure fields (Interdiction already has them inline)
-  if (unit === 'UC' || unit === 'Uniform') {
-    for (const f of DRUG_FIELDS) stats[f.key] = ''
-  }
+  // All units get drug seizure fields in their own section
+  for (const f of DRUG_FIELDS) stats[f.key] = ''
   return stats
 }
 
@@ -510,29 +501,27 @@ function EntryForm({ user }) {
         </div>
       </div>
 
-      {/* Drug seizure fields for UC and Uniform (Interdiction has them inline) */}
-      {(user.unit === 'UC' || user.unit === 'Uniform') && (
-        <div style={card}>
-          <h3 style={{ margin: '0 0 16px', color: s.navy, fontSize: 16 }}>
-            Drug Seizures
-          </h3>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
-            {DRUG_FIELDS.map(f => (
-              <div key={f.key}>
-                <label style={label}>{f.label}</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={stats[f.key] ?? ''}
-                  onChange={e => updateStat(f.key, e.target.value)}
-                  style={input}
-                  placeholder="0"
-                />
-              </div>
-            ))}
-          </div>
+      {/* Drug seizure fields — shown for all units */}
+      <div style={card}>
+        <h3 style={{ margin: '0 0 16px', color: s.navy, fontSize: 16 }}>
+          Drug Seizures
+        </h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+          {DRUG_FIELDS.map(f => (
+            <div key={f.key}>
+              <label style={label}>{f.label}</label>
+              <input
+                type="number"
+                step="any"
+                value={stats[f.key] ?? ''}
+                onChange={e => updateStat(f.key, e.target.value)}
+                style={input}
+                placeholder="0"
+              />
+            </div>
+          ))}
         </div>
-      )}
+      </div>
 
       {/* Case numbers & notes */}
       <div style={card}>
