@@ -857,6 +857,8 @@ function WeeklyDetailView({ detectives }) {
   const [weekStart, setWeekStart] = useState(getWeekStart(todayStr()))
   const [entries, setEntries] = useState([])
   const [loading, setLoading] = useState(false)
+  const [bulkExporting, setBulkExporting] = useState(null) // null | { unit, current, total, name }
+  const [bulkErrors, setBulkErrors] = useState(null) // null | string[]
 
   const dets = detectives.filter(d => d.role !== 'supervisor')
 
@@ -930,6 +932,71 @@ function WeeklyDetailView({ detectives }) {
     }
   }
 
+  async function handleBulkExport(unit) {
+    const unitDets = dets.filter(d => d.unit === unit)
+    if (!unitDets.length) return
+
+    setBulkErrors(null)
+    const failures = []
+    const weekDatesRange = getWeekDates(weekStart)
+    const endDate = weekDatesRange[6]
+
+    for (let idx = 0; idx < unitDets.length; idx++) {
+      const det = unitDets[idx]
+      setBulkExporting({ unit, current: idx + 1, total: unitDets.length, name: det.name })
+
+      try {
+        // Fetch this detective's entries for the selected week
+        const detEntries = await fetchEntriesRange(det.id, weekStart, endDate)
+
+        const payload = {
+          unit: det.unit,
+          detective_name: det.name,
+          week_start: weekStart,
+          entries: detEntries.map(e => ({
+            entry_date: e.entry_date,
+            stats: e.stats || {},
+            notes: e.notes || '',
+            case_numbers: e.case_numbers || '',
+          })),
+        }
+
+        const res = await fetch('/api/weekly', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.error || `Server error ${res.status}`)
+        }
+
+        const blob = await res.blob()
+        const lastName = det.name.split(' ').pop()
+        const fileName = `${lastName}Week${weekStart.replace(/-/g, '')}.xlsx`
+
+        // Download this file immediately
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = fileName
+        a.click()
+        URL.revokeObjectURL(url)
+
+        // Brief pause so the browser doesn't block rapid downloads
+        if (idx < unitDets.length - 1) await new Promise(r => setTimeout(r, 500))
+      } catch (err) {
+        failures.push(`${det.name}: ${err.message}`)
+      }
+    }
+
+    setBulkExporting(null)
+    if (failures.length > 0) {
+      setBulkErrors(failures)
+    }
+  }
+
   return (
     <div>
       {/* Controls */}
@@ -949,9 +1016,38 @@ function WeeklyDetailView({ detectives }) {
           <button onClick={() => shiftWeek(1)} style={btnSecondary}>Next →</button>
         </div>
         {selectedDet && (
-          <button onClick={handleExportWeekly} style={btnPrimary}>Export Weekly</button>
+          <button onClick={handleExportWeekly} style={btnPrimary} disabled={!!bulkExporting}>Export Weekly</button>
         )}
       </div>
+
+      {/* Bulk export buttons */}
+      <div style={{ ...card, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        {['UC', 'Uniform', 'Interdiction'].map(unit => (
+          <button
+            key={unit}
+            onClick={() => handleBulkExport(unit)}
+            disabled={!!bulkExporting}
+            style={{
+              ...btnPrimary,
+              opacity: bulkExporting && bulkExporting.unit !== unit ? 0.5 : 1,
+            }}
+          >
+            {bulkExporting && bulkExporting.unit === unit
+              ? `Exporting ${bulkExporting.current} of ${bulkExporting.total}: ${bulkExporting.name}...`
+              : `Export All ${unit} Weeklies`}
+          </button>
+        ))}
+      </div>
+
+      {bulkErrors && (
+        <div style={{ ...card, background: '#fef2f2', border: '1px solid #fca5a5' }}>
+          <strong style={{ color: '#991b1b' }}>Some exports failed:</strong>
+          <ul style={{ margin: '8px 0 0', paddingLeft: 20, color: '#991b1b' }}>
+            {bulkErrors.map((msg, i) => <li key={i}>{msg}</li>)}
+          </ul>
+          <button onClick={() => setBulkErrors(null)} style={{ ...btnSecondary, marginTop: 8, fontSize: 12 }}>Dismiss</button>
+        </div>
+      )}
 
       {/* Weekly table */}
       {selectedDet && (
