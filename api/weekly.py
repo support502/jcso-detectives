@@ -24,8 +24,8 @@ ACTIVITY_ROWS = [5, 8, 11, 14, 17, 20, 23]   # "Activity:" notes in C (merged)
 # Column order matches the template headers (C through M)
 UNIFORM_COLS = [
     'hours_worked', 'time_off', 'k9_deploy', 'training_hours',
-    'surv_hours', 'tno_cases', 'patrol_jail_cases', 'traffic_stops',
-    'warrant_arrests', 'agency_assist', 'supp_reports',
+    'surv_hours', 'directed_cases', 'self_made_cases', 'traffic_stops',
+    'warrant_arrests', 'vehicle_searches', 'supp_reports',
 ]
 UC_COLS = [
     'hours_worked', 'attempted_operations', 'uc_ci_cases', 'tno_cases',

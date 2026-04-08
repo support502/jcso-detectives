@@ -7,7 +7,8 @@
       "Bash(pip install:*)",
       "Bash(python3:*)",
       "Bash(ls c:/Users/bchow/Downloads/jcso-detectives/vite.config.*)",
-      "Bash(npm uninstall:*)"
+      "Bash(npm uninstall:*)",
+      "Bash(pip3 install:*)"
     ]
   }
 }

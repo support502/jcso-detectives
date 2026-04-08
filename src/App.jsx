@@ -28,13 +28,13 @@ const UNIFORM_FIELDS = [
   { key: 'hours_worked', label: 'Hours Worked' },
   { key: 'time_off', label: 'Time Off' },
   { key: 'k9_deploy', label: 'K9 Deploy' },
-  { key: 'tno_cases', label: 'TNO Cases' },
   { key: 'training_hours', label: 'Training Hours' },
   { key: 'surv_hours', label: 'Surv Hours' },
-  { key: 'patrol_jail_cases', label: 'Patrol/Jail Cases' },
+  { key: 'directed_cases', label: 'Directed Cases' },
+  { key: 'self_made_cases', label: 'Self-Made' },
   { key: 'traffic_stops', label: 'Traffic Stops' },
   { key: 'warrant_arrests', label: 'Warrant Arrests' },
-  { key: 'agency_assist', label: 'Agency Assist' },
+  { key: 'vehicle_searches', label: 'Veh. Search' },
   { key: 'supp_reports', label: 'Supp Reports' },
 ]
 

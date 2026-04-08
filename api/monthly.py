@@ -67,13 +67,13 @@ UNI_STAT_COLS = {
     'B': 'hours_worked',
     'C': 'time_off',
     'D': 'k9_deploy',
-    'E': 'tno_cases',
+    'E': 'directed_cases',
     'F': 'training_hours',
     'G': 'surv_hours',
-    'H': 'patrol_jail_cases',
+    'H': 'self_made_cases',
     'I': 'traffic_stops',
     'J': 'warrant_arrests',
-    'K': 'agency_assist',
+    'K': 'vehicle_searches',
     'L': 'supp_reports',
 }
 
@@ -164,9 +164,9 @@ INTER_YT = {
     'traffic_stops': 9, 'warrant_arrests': 10, 'pc_arrests': 11, 'agency_assist': 12,
 }
 UNI_YT = {
-    'k9_deploy': 21, 'tno_cases': 22, 'training_hours': 23, 'surv_hours': 24,
-    'patrol_jail_cases': 25, 'traffic_stops': 26, 'warrant_arrests': 27,
-    'agency_assist': 28, 'supp_reports': 29,
+    'k9_deploy': 21, 'directed_cases': 22, 'training_hours': 23, 'surv_hours': 24,
+    'self_made_cases': 25, 'traffic_stops': 26, 'warrant_arrests': 27,
+    'vehicle_searches': 28, 'supp_reports': 29,
 }
 DRUG_YT = {
     'meth_g': 32, 'cocaine_g': 33, 'heroin_g': 34, 'fentanyl_g': 35,
