@@ -750,7 +750,7 @@ function getWeekStartsForMonth(month, year) {
   return weeks.slice(0, 5)
 }
 
-function SubmissionGrid({ title, names, weekStarts, entrySet }) {
+function SubmissionGrid({ title, names, weekStarts, entryMap }) {
   return (
     <div style={card}>
       <h3 style={{ margin: '0 0 16px', color: s.navy, fontSize: 16 }}>{title}</h3>
@@ -769,12 +769,14 @@ function SubmissionGrid({ title, names, weekStarts, entrySet }) {
               <tr key={name} style={{ background: ri % 2 === 0 ? s.white : s.gray100 }}>
                 <td style={{ ...td, fontWeight: 600, color: s.navy }}>{name}</td>
                 {weekStarts.map((ws, wi) => {
-                  const has = entrySet.has(`${name}::${ws}`)
+                  const count = entryMap.get(`${name}::${ws}`) || 0
                   return (
                     <td key={wi} style={{ ...td, textAlign: 'center', fontSize: 18 }}>
-                      {has
+                      {count >= 5
                         ? <span style={{ color: s.green }}>&#10003;</span>
-                        : <span style={{ color: s.gray300 }}>—</span>}
+                        : count > 0
+                          ? <span style={{ color: '#F59E0B' }}>◐</span>
+                          : <span style={{ color: s.gray300 }}>—</span>}
                     </td>
                   )
                 })}
@@ -803,18 +805,20 @@ function Dashboard() {
 
   const weekStarts = useMemo(() => getWeekStartsForMonth(month, year), [month, year])
 
-  // Build a Set of "detective_name::week_start" for O(1) lookup
-  const entrySet = useMemo(() => {
-    const set = new Set()
+  // Build a Map of "detective_name::week_start" → count of Mon–Fri entries
+  const entryMap = useMemo(() => {
+    const map = new Map()
     for (const e of entries) {
-      // Determine which week_start this entry belongs to
       const ws = e.week_start || getWeekStart(e.entry_date)
-      // Only count if this week_start is one of the month's weeks
-      if (weekStarts.includes(ws)) {
-        set.add(`${e.user_name}::${ws}`)
-      }
+      if (!weekStarts.includes(ws)) continue
+      // Only count weekday entries (Mon=1 .. Fri=5)
+      const d = new Date(e.entry_date + 'T00:00:00')
+      const day = d.getDay() // 0=Sun, 6=Sat
+      if (day === 0 || day === 6) continue
+      const key = `${e.user_name}::${ws}`
+      map.set(key, (map.get(key) || 0) + 1)
     }
-    return set
+    return map
   }, [entries, weekStarts])
 
   return (
@@ -837,9 +841,9 @@ function Dashboard() {
         <p style={{ color: s.gray500, padding: 12 }}>Loading...</p>
       ) : (
         <>
-          <SubmissionGrid title="Uniform Detectives" names={UNIT_ROSTER.Uniform} weekStarts={weekStarts} entrySet={entrySet} />
-          <SubmissionGrid title="Interdiction" names={UNIT_ROSTER.Interdiction} weekStarts={weekStarts} entrySet={entrySet} />
-          <SubmissionGrid title="Undercover Detectives" names={UNIT_ROSTER.UC} weekStarts={weekStarts} entrySet={entrySet} />
+          <SubmissionGrid title="Uniform Detectives" names={UNIT_ROSTER.Uniform} weekStarts={weekStarts} entryMap={entryMap} />
+          <SubmissionGrid title="Interdiction" names={UNIT_ROSTER.Interdiction} weekStarts={weekStarts} entryMap={entryMap} />
+          <SubmissionGrid title="Undercover Detectives" names={UNIT_ROSTER.UC} weekStarts={weekStarts} entryMap={entryMap} />
         </>
       )}
 
