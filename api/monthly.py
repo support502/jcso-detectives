@@ -336,8 +336,7 @@ def _fill_uc_month_sheet(wb, month, year, entries):
 
     for det_name, det_config in UC_DETECTIVES.items():
         start = det_config['start_row']
-        ws[f'A{start}'] = det_name
-        ws[f'M{start}'] = det_name
+        # Names are baked into the template — don't overwrite them
 
         for wi, ws_str in enumerate(week_starts):
             if wi >= 5:
@@ -375,10 +374,9 @@ def _write_uc_year_total(wb, month, uc_stat_month, uc_drug_month):
 
 
 def fill_monthly_uc(month, year, entries):
-    """Fill a single month sheet + its Year Total column (UC). Returns BytesIO."""
+    """Fill a single month sheet (UC). Year Total has cross-sheet refs — don't touch it."""
     wb = load_workbook(UC_TEMPLATE_PATH)
-    uc_stat, uc_drug = _fill_uc_month_sheet(wb, month, year, entries)
-    _write_uc_year_total(wb, month, uc_stat, uc_drug)
+    _fill_uc_month_sheet(wb, month, year, entries)
 
     output = io.BytesIO()
     wb.save(output)
@@ -388,7 +386,8 @@ def fill_monthly_uc(month, year, entries):
 
 def fill_yearly_uc(year, entries_by_month):
     """
-    Fill ALL 12 month sheets + full Year Total (UC template).
+    Fill ALL 12 month sheets (UC template).
+    Year Total has cross-sheet refs — don't touch it.
     entries_by_month: dict {month_int: [entries]}
     """
     wb = load_workbook(UC_TEMPLATE_PATH)
@@ -396,8 +395,7 @@ def fill_yearly_uc(year, entries_by_month):
         month_entries = entries_by_month.get(m, [])
         if not month_entries:
             continue
-        uc_stat, uc_drug = _fill_uc_month_sheet(wb, m, year, month_entries)
-        _write_uc_year_total(wb, m, uc_stat, uc_drug)
+        _fill_uc_month_sheet(wb, m, year, month_entries)
 
     output = io.BytesIO()
     wb.save(output)

@@ -28,9 +28,9 @@ UNIFORM_COLS = [
     'warrant_arrests', 'agency_assist', 'supp_reports',
 ]
 UC_COLS = [
-    'hours', 'attempted_operations', 'uc_ci_cases', 'tno_cases',
-    'sw_cases', 'surv_hours', 'patrol_cases', 'pc_arrest',
-    'warrant_arrest', 'training_hours', 'detective_agency_assist',
+    'hours_worked', 'attempted_operations', 'uc_ci_cases', 'tno_cases',
+    'sw_cases', 'surv_hours', 'patrol_jail_cases', 'pc_arrests',
+    'warrant_arrests', 'training_hours', 'detective_agency_assist',
 ]
 INTERDICTION_COLS = [
     'hours_worked', 'drug_seizures', 'criminal_seizures', 'currency_seizures',

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import JSZip from 'jszip'
 import {
   supabase, getWeekStart, getWeekDates, formatDate, formatDateLong,
   todayStr, fetchUsers, loginUser, fetchEntry, upsertEntry,
@@ -1105,14 +1106,16 @@ function WeeklyDetailView({ detectives }) {
    10. SUPERVISOR — Monthly Report (XLSX export)
    ═══════════════════════════════════════════════════════════════════ */
 
-function MonthlyExportCard({ unit, title, description }) {
+function MonthlyReport() {
   const [month, setMonth] = useState(new Date().getMonth() + 1)
   const [year, setYear] = useState(new Date().getFullYear())
-  const [generatingMonth, setGeneratingMonth] = useState(false)
-  const [generatingYear, setGeneratingYear] = useState(false)
+  const [busy, setBusy] = useState(null) // null | string describing current op
+  const [weeklyProgress, setWeeklyProgress] = useState(null) // null | { current, total, name, week }
+  const [errors, setErrors] = useState(null) // null | string[]
 
-  async function downloadBlob(res, fileName) {
-    const blob = await res.blob()
+  const anyBusy = !!busy
+
+  function downloadBlob(blob, fileName) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -1121,8 +1124,9 @@ function MonthlyExportCard({ unit, title, description }) {
     URL.revokeObjectURL(url)
   }
 
-  async function exportMonth() {
-    setGeneratingMonth(true)
+  async function exportMonthly(unit) {
+    setBusy(`monthly-${unit}`)
+    setErrors(null)
     try {
       const entries = await fetchMonthEntries(month, year)
       const res = await fetch('/api/monthly', {
@@ -1134,44 +1138,121 @@ function MonthlyExportCard({ unit, title, description }) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.error || `Server error ${res.status}`)
       }
-      await downloadBlob(res, `JCSO_Monthly_${unit}_${MONTH_NAMES[month]}_${year}.xlsx`)
+      const blob = await res.blob()
+      downloadBlob(blob, `${unit}_Monthly_${MONTH_NAMES[month]}_${year}.xlsx`)
     } catch (err) {
-      alert('Error generating report: ' + err.message)
+      alert('Export failed: ' + err.message)
     }
-    setGeneratingMonth(false)
+    setBusy(null)
   }
 
-  async function exportYear() {
-    setGeneratingYear(true)
-    try {
-      // Fetch all 12 months of entries and group by month
-      const allEntries = await fetchMonthEntries(null, year)
-      const entriesByMonth = {}
-      for (const e of allEntries) {
-        const m = e.month
-        if (!entriesByMonth[m]) entriesByMonth[m] = []
-        entriesByMonth[m].push(e)
+  // Compute week-start Sundays that overlap a given month
+  function getWeekStartsForMonth(m, y) {
+    const first = new Date(y, m - 1, 1)
+    const start = new Date(first)
+    start.setDate(start.getDate() - start.getDay()) // Sunday on or before the 1st
+    const lastDay = new Date(m < 12 ? new Date(y, m, 1) : new Date(y + 1, 0, 1))
+    lastDay.setDate(lastDay.getDate() - 1)
+    const weeks = []
+    const cur = new Date(start)
+    while (weeks.length < 6) {
+      const weekEnd = new Date(cur)
+      weekEnd.setDate(weekEnd.getDate() + 6)
+      if ((cur.getMonth() + 1 === m && cur.getFullYear() === y) ||
+          (weekEnd.getMonth() + 1 === m && weekEnd.getFullYear() === y)) {
+        weeks.push(cur.toISOString().split('T')[0])
       }
-      const res = await fetch('/api/monthly', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ year, unit, export_type: 'year', entries_by_month: entriesByMonth }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || `Server error ${res.status}`)
-      }
-      await downloadBlob(res, `JCSO_Yearly_${unit}_${year}.xlsx`)
-    } catch (err) {
-      alert('Error generating report: ' + err.message)
+      cur.setDate(cur.getDate() + 7)
+      if (cur > new Date(lastDay.getTime() + 7 * 86400000)) break
     }
-    setGeneratingYear(false)
+    return weeks.slice(0, 5)
   }
+
+  async function exportWeeklies(unit) {
+    setBusy(`weeklies-${unit}`)
+    setErrors(null)
+    setWeeklyProgress(null)
+
+    const roster = UNIT_ROSTER[unit] || []
+    const weekStarts = getWeekStartsForMonth(month, year)
+    const totalCalls = roster.length * weekStarts.length
+    const failures = []
+    const zip = new JSZip()
+    let callNum = 0
+
+    for (const detName of roster) {
+      // Find this detective in the db users list (for their id)
+      // We don't have the detectives prop here, so we fetch entries by name via fetchMonthEntries
+      // Actually we need user_id for fetchEntriesRange. Let's look up from UNIT_ROSTER name.
+      // We'll fetch entries for the whole month and filter by name + week.
+      for (const ws of weekStarts) {
+        callNum++
+        const weekEnd = getWeekDates(ws)[6]
+        const weekLabel = `Week of ${MONTH_NAMES[month].slice(0, 3)} ${new Date(ws + 'T00:00:00').getDate()}`
+        setWeeklyProgress({ current: callNum, total: totalCalls, name: detName, week: weekLabel })
+
+        try {
+          // Fetch entries for this detective+week from Supabase by name
+          const { data: detEntries, error } = await supabase
+            .from('det_entries')
+            .select('*')
+            .eq('user_name', detName)
+            .gte('entry_date', ws)
+            .lte('entry_date', weekEnd)
+            .order('entry_date')
+          if (error) throw error
+
+          const payload = {
+            unit,
+            detective_name: detName,
+            week_start: ws,
+            entries: (detEntries || []).map(e => ({
+              entry_date: e.entry_date,
+              stats: e.stats || {},
+              notes: e.notes || '',
+              case_numbers: e.case_numbers || '',
+            })),
+          }
+
+          const res = await fetch('/api/weekly', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          })
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}))
+            throw new Error(err.error || `Server error ${res.status}`)
+          }
+
+          const blob = await res.blob()
+          const lastName = detName.split(' ').pop()
+          const fileName = `${lastName}Week${ws.replace(/-/g, '')}.xlsx`
+          zip.file(fileName, blob)
+        } catch (err) {
+          failures.push(`${detName} (${weekLabel}): ${err.message}`)
+        }
+      }
+    }
+
+    // Download zip
+    const zipBlob = await zip.generateAsync({ type: 'blob' })
+    downloadBlob(zipBlob, `${unit}_Weeklies_${MONTH_NAMES[month]}_${year}.zip`)
+
+    setWeeklyProgress(null)
+    setBusy(null)
+    if (failures.length > 0) setErrors(failures)
+  }
+
+  const units = [
+    { key: 'UC', label: 'UC' },
+    { key: 'Uniform', label: 'Uniform' },
+    { key: 'Interdiction', label: 'Interdiction' },
+  ]
 
   return (
-    <div style={card}>
-      <h3 style={{ margin: '0 0 16px', color: s.navy }}>{title}</h3>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+    <div>
+      {/* Month/Year picker */}
+      <div style={{ ...card, display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
         <div>
           <label style={label}>Month</label>
           <select value={month} onChange={e => setMonth(Number(e.target.value))} style={{ ...input, width: 150 }}>
@@ -1182,31 +1263,40 @@ function MonthlyExportCard({ unit, title, description }) {
           <label style={label}>Year</label>
           <input type="number" value={year} onChange={e => setYear(Number(e.target.value))} style={{ ...input, width: 100 }} />
         </div>
-        <button onClick={exportMonth} disabled={generatingMonth || generatingYear} style={btnPrimary}>
-          {generatingMonth ? 'Exporting...' : 'Export Month'}
-        </button>
-        <button onClick={exportYear} disabled={generatingMonth || generatingYear} style={btnPrimary}>
-          {generatingYear ? 'Exporting...' : 'Export Year'}
-        </button>
       </div>
-      <p style={{ margin: '12px 0 0', fontSize: 13, color: s.gray500 }}>{description}</p>
-    </div>
-  )
-}
 
-function MonthlyReport() {
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 16 }}>
-      <MonthlyExportCard
-        unit="Uniform"
-        title="Uniform / Interdiction Monthly"
-        description="Exports Uniform & Interdiction sections with weekly breakdowns per detective, plus Year Total sheet."
-      />
-      <MonthlyExportCard
-        unit="UC"
-        title="UC Monthly"
-        description="Exports UC section with weekly breakdowns per detective, plus Year Total sheet."
-      />
+      {/* Unit export buttons — one row per unit */}
+      {units.map(({ key, label: unitLabel }) => (
+        <div key={key} style={{ ...card, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 700, color: s.navy, minWidth: 100, fontSize: 14 }}>{unitLabel}</span>
+          <button
+            onClick={() => exportMonthly(key)}
+            disabled={anyBusy}
+            style={{ ...btnPrimary, opacity: anyBusy && busy !== `monthly-${key}` ? 0.5 : 1 }}
+          >
+            {busy === `monthly-${key}` ? 'Exporting...' : `Export ${unitLabel} Monthly`}
+          </button>
+          <button
+            onClick={() => exportWeeklies(key)}
+            disabled={anyBusy}
+            style={{ ...btnPrimary, opacity: anyBusy && busy !== `weeklies-${key}` ? 0.5 : 1 }}
+          >
+            {busy === `weeklies-${key}` && weeklyProgress
+              ? `Exporting ${weeklyProgress.current} of ${weeklyProgress.total}: ${weeklyProgress.name} — ${weeklyProgress.week}...`
+              : `Export ${unitLabel} Weeklies`}
+          </button>
+        </div>
+      ))}
+
+      {errors && (
+        <div style={{ ...card, background: '#fef2f2', border: '1px solid #fca5a5' }}>
+          <strong style={{ color: '#991b1b' }}>Some exports failed:</strong>
+          <ul style={{ margin: '8px 0 0', paddingLeft: 20, color: '#991b1b' }}>
+            {errors.map((msg, i) => <li key={i}>{msg}</li>)}
+          </ul>
+          <button onClick={() => setErrors(null)} style={{ ...btnSecondary, marginTop: 8, fontSize: 12 }}>Dismiss</button>
+        </div>
+      )}
     </div>
   )
 }
