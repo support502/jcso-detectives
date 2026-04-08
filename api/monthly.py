@@ -122,6 +122,7 @@ UC_DETECTIVES = {
     'Layne Verdine':  {'start_row': 10},
     'Ryan Golmon':    {'start_row': 17},
     'Matthew Flowers': {'start_row': 24},
+    'Tyler Lewis':     {'start_row': 31},
 }
 
 
