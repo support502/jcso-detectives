@@ -723,7 +723,7 @@ function DetectiveView({ user }) {
 const UNIT_ROSTER = {
   Uniform: ['Brian Chowns', 'Scott Weaver', 'Tamara Spikes', 'William Crain'],
   Interdiction: ['Jake Droddy', 'Brigitte Morse'],
-  UC: ['Colton Lowe', 'Layne Verdine', 'Ryan Golmon', 'Matthew Flowers'],
+  UC: ['Colton Lowe', 'Layne Verdine', 'Ryan Golmon', 'Matthew Flowers', 'Tyler Lewis'],
 }
 
 // Compute up to 5 week-start Sundays that overlap a given month
