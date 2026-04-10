@@ -764,7 +764,6 @@ function TimeOffForm({ user, onClose, onSaved, requireSignature, editRow }) {
       const payload = {
         user_id: user.id,
         user_name: user.name,
-        unit: user.unit,
         request_date: requestDate,
         type,
         other_code: type === 'Other' ? otherCode.trim() : null,
@@ -883,7 +882,6 @@ function OvertimeForm({ user, onClose, onSaved, requireSignature, editRow }) {
       const payload = {
         user_id: user.id,
         user_name: user.name,
-        unit: user.unit,
         date_worked: dateWorked,
         time_worked: timeWorked.trim() || null,
         regular_shift_time: regularShift.trim() || null,
