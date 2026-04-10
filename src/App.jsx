@@ -763,7 +763,6 @@ function TimeOffForm({ user, onClose, onSaved, requireSignature, editRow }) {
     try {
       const payload = {
         user_id: user.id,
-        user_name: user.name,
         request_date: requestDate,
         type,
         other_code: type === 'Other' ? otherCode.trim() : null,
@@ -774,7 +773,7 @@ function TimeOffForm({ user, onClose, onSaved, requireSignature, editRow }) {
         person_signed_at: new Date().toISOString(),
       }
       if (editRow) {
-        await updateTimeOffRequest(editRow.id, payload)
+        await updateTimeOffRequest(editRow.id, { ...payload, updated_at: new Date().toISOString() })
       } else {
         await createTimeOffRequest(payload)
       }
@@ -863,11 +862,11 @@ function TimeOffForm({ user, onClose, onSaved, requireSignature, editRow }) {
 function OvertimeForm({ user, onClose, onSaved, requireSignature, editRow }) {
   const [dateWorked, setDateWorked] = useState(editRow?.date_worked || todayStr())
   const [timeWorked, setTimeWorked] = useState(editRow?.time_worked || '')
-  const [regularShift, setRegularShift] = useState(editRow?.regular_shift_time || '')
+  const [regularShift, setRegularShift] = useState(editRow?.reg_shift_time || '')
   const [hoursWorked, setHoursWorked] = useState(editRow?.hours_worked != null ? String(editRow.hours_worked) : '')
   const [caseNumbers, setCaseNumbers] = useState(editRow?.case_numbers || '')
   const [purpose, setPurpose] = useState(editRow?.purpose || '')
-  const [request, setRequest] = useState(editRow?.request || '')
+  const [request, setRequest] = useState(editRow?.payment_or_comp || '')
   const [grade, setGrade] = useState(editRow?.grade || '')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -881,20 +880,19 @@ function OvertimeForm({ user, onClose, onSaved, requireSignature, editRow }) {
     try {
       const payload = {
         user_id: user.id,
-        user_name: user.name,
         date_worked: dateWorked,
         time_worked: timeWorked.trim() || null,
-        regular_shift_time: regularShift.trim() || null,
+        reg_shift_time: regularShift.trim() || null,
         hours_worked: Number(hoursWorked),
         case_numbers: caseNumbers.trim() || null,
         purpose: purpose.trim() || null,
-        request: request || null,
+        payment_or_comp: request || null,
         grade: grade.trim() || null,
         status: 'pending',
         person_signed_at: new Date().toISOString(),
       }
       if (editRow) {
-        await updateOvertimeRequest(editRow.id, payload)
+        await updateOvertimeRequest(editRow.id, { ...payload, updated_at: new Date().toISOString() })
       } else {
         await createOvertimeRequest(payload)
       }
