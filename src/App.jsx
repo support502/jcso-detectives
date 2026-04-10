@@ -1525,6 +1525,34 @@ function PayrollView({ detectives }) {
     }
   }
 
+  const [exportingAll, setExportingAll] = useState(false)
+
+  async function handleExportAll() {
+    if (!selectedPeriod || exportingAll) return
+    setExportingAll(true)
+    try {
+      const res = await fetch('/api/timesheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'export_all', pay_period_start: selectedPeriod }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Export failed')
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `JCSO_Detectives_Payroll_${selectedPeriod}.xlsx`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      alert('Export failed: ' + err.message)
+    }
+    setExportingAll(false)
+  }
+
   const dayHeaders = gridData ? gridData.map(d => {
     const dt = new Date(d.day_date + 'T00:00:00')
     return `${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getDay()]} ${dt.getMonth()+1}/${dt.getDate()}`
@@ -1667,7 +1695,12 @@ function PayrollView({ detectives }) {
           {/* Action buttons */}
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
             <button onClick={handleReset} style={btnSecondary}>Start Over</button>
-            <button onClick={handleExport} style={btnPrimary}>Export to Excel</button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={handleExport} style={btnSecondary}>Export to Excel</button>
+              <button onClick={handleExportAll} disabled={exportingAll} style={{ ...btnPrimary, opacity: exportingAll ? 0.6 : 1, cursor: exportingAll ? 'not-allowed' : 'pointer' }}>
+                {exportingAll ? 'Exporting...' : 'Export Full Pay Period'}
+              </button>
+            </div>
           </div>
         </>
       ) : null}

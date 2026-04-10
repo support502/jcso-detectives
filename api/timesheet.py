@@ -51,13 +51,83 @@ def _all_holidays():
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 MASTER_BLANK = os.path.join(TEMPLATE_DIR, 'MASTER_BLANK.xlsx')
 
-# ── Template layout constants ───────────────────────────────────────────────
-# 14 day columns: C(Sun wk1) .. P(Sat wk2)
-DAY_COLS = [chr(ord('C') + i) for i in range(14)]  # C D E F G H I J K L M N O P
-# First detective block on JCCH1
-BLOCK1_RG_ROW = 4
-BLOCK1_CODE_ROWS = [5, 6, 7, 8, 9]
-BLOCK1_TOTAL_ROW = 10
+# ── Template layout helpers ────────────────────────────────────────────────
+
+# 14 day columns: C(Sun wk1) .. P(Sat wk2)  →  column indices 3..16
+DAY_COL_START = 3   # C
+DAY_COL_END   = 16  # P
+
+
+def _find_blocks(ws):
+    """Scan a worksheet for detective blocks.
+
+    Returns a list of (rg_row, code_rows, total_row) tuples found by
+    locating 'RG' in column B (code column) and 'TOTAL' in column R.
+    """
+    rg_rows = []
+    total_rows = []
+    for row in range(1, ws.max_row + 1):
+        if ws.cell(row, 2).value == 'RG':       # col B
+            rg_rows.append(row)
+        if ws.cell(row, 18).value == 'TOTAL':    # col R
+            total_rows.append(row)
+
+    blocks = []
+    for rg, total in zip(rg_rows, total_rows):
+        code_rows = list(range(rg + 1, total))
+        blocks.append((rg, code_rows, total))
+    return blocks
+
+
+def _fill_detective_block(ws, rg_row, code_rows_list, ts_rows, detective_name):
+    """Fill one detective block on a worksheet.
+
+    Writes only cell values in columns A-P.  Columns Q and R contain
+    SUM / =B formulas in the template and are left untouched so Excel
+    recalculates them on open.  The TOTAL row is also formula-driven.
+    """
+    last_name = detective_name.split()[-1]
+
+    # Name in col A of RG row
+    ws.cell(rg_row, 1).value = last_name
+
+    # Fill RG hours (cols C-P)
+    for i, tr in enumerate(ts_rows):
+        val = float(tr.get('reg_hours', 0))
+        ws.cell(rg_row, DAY_COL_START + i).value = val if val else None
+
+    # Gather unique codes in order of appearance
+    code_order = []
+    for tr in ts_rows:
+        for cr in (tr.get('code_rows') or []):
+            code = cr.get('code', '')
+            if code and code not in code_order:
+                code_order.append(code)
+
+    # Build per-code day arrays
+    code_days = {c: [0.0] * 14 for c in code_order}
+    for i, tr in enumerate(ts_rows):
+        for cr in (tr.get('code_rows') or []):
+            code = cr.get('code', '')
+            hrs = float(cr.get('hours', 0))
+            if code in code_days:
+                code_days[code][i] += hrs
+
+    # Write code rows (code name in col B, hours in cols C-P)
+    for code_idx, code in enumerate(code_order):
+        if code_idx >= len(code_rows_list):
+            break
+        row_num = code_rows_list[code_idx]
+        ws.cell(row_num, 2).value = code  # B
+        for day_i in range(14):
+            val = code_days[code][day_i]
+            ws.cell(row_num, DAY_COL_START + day_i).value = val if val else None
+
+
+def _clear_block_defaults(ws, rg_row):
+    """Clear the default placeholder 8s from an unused RG row (cols C-P)."""
+    for col in range(DAY_COL_START, DAY_COL_END + 1):
+        ws.cell(rg_row, col).value = None
 
 
 def _cors_headers(h):
@@ -245,74 +315,109 @@ def action_export(body):
     wb = load_workbook(MASTER_BLANK)
     ws = wb['JCCH1']
 
-    # ── Header info ──
+    # Date headers (JCCH2-5 reference JCCH1 via formulas)
     pp_start_date = _parse_date(pp_start)
     pp_end_date = pp_start_date + datetime.timedelta(days=13)
-    last_name = detective_name.split()[-1]
-
-    ws['A4'] = last_name
     ws['M1'] = pp_start_date
     ws['O1'] = pp_end_date
 
-    # ── Fill RG row (row 4) with reg_hours ──
-    rg_total = 0.0
-    for i, tr in enumerate(ts_rows):
-        val = float(tr.get('reg_hours', 0))
-        ws[f'{DAY_COLS[i]}{BLOCK1_RG_ROW}'] = val if val else None
-        rg_total += val
-    ws[f'Q{BLOCK1_RG_ROW}'] = rg_total
-    ws[f'R{BLOCK1_RG_ROW}'] = 'RG'
+    # Fill first block using helper
+    blocks = _find_blocks(ws)
+    rg_row, code_rows_list, _total_row = blocks[0]
+    _fill_detective_block(ws, rg_row, code_rows_list, ts_rows, detective_name)
 
-    # ── Gather code rows (OT, HL, etc. — all live in code_rows now) ──
-    # Collect all unique codes in order of appearance
-    code_order = []
-    for tr in ts_rows:
-        for cr in (tr.get('code_rows') or []):
-            code = cr.get('code', '')
-            if code and code not in code_order:
-                code_order.append(code)
+    # Clear default placeholder 8s on unused blocks
+    for _, (unused_rg, _unused_codes, _unused_total) in enumerate(blocks[1:]):
+        _clear_block_defaults(ws, unused_rg)
 
-    # Build per-code day arrays
-    code_days = {c: [0.0] * 14 for c in code_order}
-    for i, tr in enumerate(ts_rows):
-        for cr in (tr.get('code_rows') or []):
-            code = cr.get('code', '')
-            hrs = float(cr.get('hours', 0))
-            if code in code_days:
-                code_days[code][i] += hrs
+    # Clear unused blocks on all other sheets
+    for sheet_name in wb.sheetnames:
+        if sheet_name == 'JCCH1':
+            continue
+        other_ws = wb[sheet_name]
+        for unused_rg, _unused_codes, _unused_total in _find_blocks(other_ws):
+            _clear_block_defaults(other_ws, unused_rg)
 
-    # Write code rows into blank rows 5-9
-    for code_idx, code in enumerate(code_order):
-        if code_idx >= len(BLOCK1_CODE_ROWS):
-            break  # only 5 blank code rows available
-        row_num = BLOCK1_CODE_ROWS[code_idx]
-        ws[f'B{row_num}'] = code
-        ws[f'R{row_num}'] = code
-        row_total = 0.0
-        for day_i in range(14):
-            val = code_days[code][day_i]
-            ws[f'{DAY_COLS[day_i]}{row_num}'] = val if val else None
-            row_total += val
-        ws[f'Q{row_num}'] = row_total
-
-    # ── TOTAL row (row 10) ──
-    grand_total = 0.0
-    for day_i in range(14):
-        day_total = 0.0
-        # RG
-        day_total += float(ts_rows[day_i].get('reg_hours', 0))
-        # All code rows
-        for code in code_order:
-            day_total += code_days[code][day_i]
-        ws[f'{DAY_COLS[day_i]}{BLOCK1_TOTAL_ROW}'] = day_total if day_total else None
-        grand_total += day_total
-    ws[f'Q{BLOCK1_TOTAL_ROW}'] = grand_total
-
-    # ── Save to bytes ──
+    # Save to bytes
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
+    last_name = detective_name.split()[-1]
     return output, last_name, pp_start
+
+
+def action_export_all(body):
+    """Export all detectives into MASTER_BLANK.xlsx, return .xlsx bytes."""
+    from openpyxl import load_workbook
+
+    pp_start = body['pay_period_start']
+
+    if not os.path.exists(MASTER_BLANK):
+        raise FileNotFoundError(f'Template not found: {MASTER_BLANK}')
+
+    sb = get_supabase()
+
+    # Fetch all users, sort by last name (case-insensitive)
+    resp = sb.table('det_users').select('id, name').execute()
+    users = sorted(
+        resp.data or [],
+        key=lambda u: u['name'].split()[-1].lower(),
+    )
+
+    wb = load_workbook(MASTER_BLANK)
+
+    # Build flat list of (sheet, block) slots across all 5 sheets × 4 blocks
+    all_slots = []  # [(ws, rg_row, code_rows, total_row), ...]
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        for rg_row, code_rows_list, total_row in _find_blocks(ws):
+            all_slots.append((ws, rg_row, code_rows_list, total_row))
+
+    max_slots = len(all_slots)
+    if len(users) > max_slots:
+        raise ValueError(
+            f'Too many detectives ({len(users)}) for {max_slots} available '
+            f'template slots. Maximum supported is {max_slots}.'
+        )
+
+    # Date headers on JCCH1 (other sheets reference via formulas)
+    pp_start_date = _parse_date(pp_start)
+    pp_end_date = pp_start_date + datetime.timedelta(days=13)
+    wb['JCCH1']['M1'] = pp_start_date
+    wb['JCCH1']['O1'] = pp_end_date
+
+    # Fill each detective into their slot
+    used_slots = set()
+    for idx, user in enumerate(users):
+        ws, rg_row, code_rows_list, _total_row = all_slots[idx]
+        used_slots.add(idx)
+
+        # Ensure timesheet data exists (pull from det_entries if needed)
+        ts_resp = sb.table('timesheet_entries') \
+            .select('*') \
+            .eq('user_id', user['id']) \
+            .eq('pay_period_start', pp_start) \
+            .order('day_date') \
+            .execute()
+
+        if ts_resp.data and len(ts_resp.data) == 14:
+            ts_rows = ts_resp.data
+        else:
+            ts_rows = _pull_from_entries(user['id'], pp_start)
+
+        _fill_detective_block(ws, rg_row, code_rows_list, ts_rows, user['name'])
+
+    # Clear default placeholder 8s from unused blocks
+    for idx in range(len(all_slots)):
+        if idx not in used_slots:
+            ws, rg_row, _code_rows, _total_row = all_slots[idx]
+            _clear_block_defaults(ws, rg_row)
+
+    # Save to bytes
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output, pp_start
 
 
 # ── Handler ─────────────────────────────────────────────────────────────────
@@ -343,6 +448,23 @@ class handler(BaseHTTPRequestHandler):
             elif action == 'export':
                 output, last_name, pp_start = action_export(body)
                 filename = f'{last_name}_Timesheet_{pp_start}.xlsx'
+
+                self.send_response(200)
+                self.send_header(
+                    'Content-Type',
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                self.send_header(
+                    'Content-Disposition',
+                    f'attachment; filename="{filename}"'
+                )
+                _cors_headers(self)
+                self.end_headers()
+                self.wfile.write(output.read())
+
+            elif action == 'export_all':
+                output, pp_start = action_export_all(body)
+                filename = f'JCSO_Detectives_Payroll_{pp_start}.xlsx'
 
                 self.send_response(200)
                 self.send_header(
