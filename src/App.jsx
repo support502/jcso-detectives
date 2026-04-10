@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import JSZip from 'jszip'
 import {
   supabase, getWeekStart, getWeekDates, formatDate, formatDateLong,
@@ -1306,19 +1306,412 @@ function MonthlyReport() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   11. SUPERVISOR VIEW — wraps all supervisor tabs
+   11. PAYROLL VIEW — supervisor timesheet management
    ═══════════════════════════════════════════════════════════════════ */
 
-function SupervisorView({ detectives }) {
+const PAYROLL_CODES = new Set(['MP','RG','FL','PL','DL','ML','AW','CC','CS','FBI','FP','HL','HC','HS','HP','HW','OS','SO','SH','ST','UL','VT','CT','OE','CE','DF','LW','WC','AC','DP','EW','ET','EH','PT','EL','OT'])
+const NUM_CODE_ROWS = 5
+
+const PAY_PERIODS = (() => {
+  const anchor = new Date('2026-01-04T00:00:00')
+  const periods = []
+  const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  for (let i = 0; i < 52; i++) {
+    const start = new Date(anchor)
+    start.setDate(start.getDate() + i * 14)
+    const end = new Date(start)
+    end.setDate(end.getDate() + 13)
+    periods.push({
+      start: start.toISOString().split('T')[0],
+      end: end.toISOString().split('T')[0],
+      label: `${fmt(start)} - ${fmt(end)}, ${end.getFullYear()}`,
+    })
+  }
+  return periods
+})()
+
+function findCurrentPayPeriod() {
+  const today = todayStr()
+  for (const p of PAY_PERIODS) {
+    if (today >= p.start && today <= p.end) return p.start
+  }
+  return PAY_PERIODS[0]?.start || ''
+}
+
+function normalizeTimesheetGrid(rows) {
+  // Collect all unique codes across all days, in order of first appearance
+  const allCodes = []
+  for (const r of rows) {
+    for (const cr of (r.code_rows || [])) {
+      if (cr.code && !allCodes.includes(cr.code)) allCodes.push(cr.code)
+    }
+  }
+  return rows.map(r => {
+    const codeMap = {}
+    for (const cr of (r.code_rows || [])) {
+      if (cr.code) codeMap[cr.code] = Number(cr.hours) || 0
+    }
+    const normalizedCodes = []
+    for (let i = 0; i < NUM_CODE_ROWS; i++) {
+      const code = allCodes[i] || ''
+      normalizedCodes.push({ code, hours: code ? (codeMap[code] || 0) : 0 })
+    }
+    return {
+      ...r,
+      reg_hours: Number(r.reg_hours) || 0,
+      ot_hours: Number(r.ot_hours) || 0,
+      code_rows: normalizedCodes,
+    }
+  })
+}
+
+function PayrollView({ detectives }) {
+  const [selectedPeriod, setSelectedPeriod] = useState(findCurrentPayPeriod)
+
+  const dets = useMemo(() => {
+    return detectives
+      .filter(d => d.role !== 'supervisor')
+      .sort((a, b) => a.name.split(' ').pop().localeCompare(b.name.split(' ').pop()))
+  }, [detectives])
+
+  const [selectedDetId, setSelectedDetId] = useState('')
+  const selectedDet = dets.find(d => String(d.id) === String(selectedDetId))
+
+  useEffect(() => {
+    if (dets.length > 0 && !selectedDetId) setSelectedDetId(String(dets[0].id))
+  }, [dets])
+
+  const [gridData, setGridData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [saveStatus, setSaveStatus] = useState('')
+  const saveTimerRef = useRef(null)
+  const saveStatusTimerRef = useRef(null)
+  const gridDataRef = useRef(null)
+  const selectedDetIdRef = useRef(selectedDetId)
+  const selectedPeriodRef = useRef(selectedPeriod)
+
+  useEffect(() => { gridDataRef.current = gridData }, [gridData])
+  useEffect(() => { selectedDetIdRef.current = selectedDetId }, [selectedDetId])
+  useEffect(() => { selectedPeriodRef.current = selectedPeriod }, [selectedPeriod])
+
+  // Pull data when detective or period changes
+  useEffect(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    if (!selectedDetId || !selectedPeriod) return
+    setLoading(true)
+    setGridData(null)
+    setSaveStatus('')
+    fetch('/api/timesheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'pull', user_id: selectedDetId, pay_period_start: selectedPeriod }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data)) setGridData(normalizeTimesheetGrid(data))
+        else throw new Error(data.error || 'Failed to pull data')
+      })
+      .catch(err => alert('Failed to load timesheet: ' + err.message))
+      .finally(() => setLoading(false))
+  }, [selectedDetId, selectedPeriod])
+
+  function updateCell(dayIndex, field, value, codeRowIndex) {
+    setGridData(prev => {
+      if (!prev) return prev
+      return prev.map((d, i) => {
+        if (i !== dayIndex) return d
+        const day = { ...d }
+        if (field === 'reg_hours') day.reg_hours = value
+        else if (field === 'ot_hours') day.ot_hours = value
+        else if (field === 'code') {
+          day.code_rows = day.code_rows.map((cr, ci) => ci === codeRowIndex ? { ...cr, code: value } : cr)
+        } else if (field === 'code_hours') {
+          day.code_rows = day.code_rows.map((cr, ci) => ci === codeRowIndex ? { ...cr, hours: value } : cr)
+        }
+        return day
+      })
+    })
+    scheduleSave()
+  }
+
+  function updateCodeName(codeRowIndex, value) {
+    setGridData(prev => {
+      if (!prev) return prev
+      return prev.map(d => ({
+        ...d,
+        code_rows: d.code_rows.map((cr, ci) => ci === codeRowIndex ? { ...cr, code: value } : cr),
+      }))
+    })
+    scheduleSave()
+  }
+
+  function scheduleSave() {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(doSave, 500)
+  }
+
+  async function doSave() {
+    const data = gridDataRef.current
+    const detId = selectedDetIdRef.current
+    const period = selectedPeriodRef.current
+    if (!data || !detId || !period) return
+    setSaveStatus('saving')
+    try {
+      const res = await fetch('/api/timesheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save',
+          user_id: detId,
+          pay_period_start: period,
+          days: data.map(d => ({
+            day_date: d.day_date,
+            reg_hours: Number(d.reg_hours) || 0,
+            ot_hours: Number(d.ot_hours) || 0,
+            code_rows: d.code_rows.filter(cr => cr.code.trim() !== ''),
+          })),
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Save failed')
+      }
+      setSaveStatus('saved')
+      if (saveStatusTimerRef.current) clearTimeout(saveStatusTimerRef.current)
+      saveStatusTimerRef.current = setTimeout(() => setSaveStatus(''), 2000)
+    } catch {
+      setSaveStatus('error')
+    }
+  }
+
+  async function handleReset() {
+    if (!selectedDet || !selectedPeriod) return
+    const period = PAY_PERIODS.find(p => p.start === selectedPeriod)
+    const lastName = selectedDet.name.split(' ').pop()
+    if (!confirm(`This will erase all your changes for ${lastName} in pay period ${period?.label || selectedPeriod} and re-pull fresh data. Are you sure?`)) return
+    setLoading(true)
+    try {
+      const res = await fetch('/api/timesheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset', user_id: selectedDetId, pay_period_start: selectedPeriod }),
+      })
+      const data = await res.json()
+      if (Array.isArray(data)) setGridData(normalizeTimesheetGrid(data))
+      else throw new Error(data.error || 'Reset failed')
+    } catch (err) {
+      alert('Reset failed: ' + err.message)
+    }
+    setLoading(false)
+  }
+
+  async function handleExport() {
+    if (!selectedDet || !selectedPeriod) return
+    try {
+      const res = await fetch('/api/timesheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'export', user_id: selectedDetId, pay_period_start: selectedPeriod, detective_name: selectedDet.name }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Export failed')
+      }
+      const blob = await res.blob()
+      const lastName = selectedDet.name.split(' ').pop()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${lastName}_Timesheet_${selectedPeriod}.xlsx`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      alert('Export failed: ' + err.message)
+    }
+  }
+
+  const dayHeaders = gridData ? gridData.map(d => {
+    const dt = new Date(d.day_date + 'T00:00:00')
+    return `${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dt.getDay()]} ${dt.getMonth()+1}/${dt.getDate()}`
+  }) : []
+
+  const rowTotals = gridData ? {
+    rg: gridData.reduce((sum, d) => sum + (Number(d.reg_hours) || 0), 0),
+    ot: gridData.reduce((sum, d) => sum + (Number(d.ot_hours) || 0), 0),
+    codes: Array.from({ length: NUM_CODE_ROWS }, (_, ci) =>
+      gridData.reduce((sum, d) => sum + (Number(d.code_rows[ci]?.hours) || 0), 0)
+    ),
+  } : null
+
+  const colTotals = gridData ? gridData.map(d => {
+    let t = (Number(d.reg_hours) || 0) + (Number(d.ot_hours) || 0)
+    for (const cr of d.code_rows) t += (Number(cr.hours) || 0)
+    return t
+  }) : null
+
+  const grandTotal = colTotals ? colTotals.reduce((a, b) => a + b, 0) : 0
+
+  const cellInput = {
+    width: 50, padding: '4px 2px', borderRadius: 4, border: `1px solid ${s.gray300}`,
+    fontFamily: s.font, fontSize: 13, textAlign: 'center', outline: 'none', boxSizing: 'border-box',
+  }
+  const codeInput = {
+    width: 42, padding: '4px 2px', borderRadius: 4, border: `1px solid ${s.gray300}`,
+    fontFamily: s.font, fontSize: 12, textAlign: 'center', outline: 'none', boxSizing: 'border-box',
+    textTransform: 'uppercase',
+  }
+  const stickyTd = (bg) => ({
+    ...td, fontWeight: 700, color: s.navy, position: 'sticky', left: 0, background: bg, zIndex: 1,
+  })
+
+  return (
+    <div>
+      {/* Header row */}
+      <div style={{ ...card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+        <h2 style={{ margin: 0, color: s.navy, fontSize: 20 }}>Payroll Timesheets</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {saveStatus === 'saved' && <span style={{ fontSize: 12, color: s.green, fontWeight: 600, transition: 'opacity 0.3s' }}>Saved</span>}
+          {saveStatus === 'saving' && <span style={{ fontSize: 12, color: s.gray500 }}>Saving...</span>}
+          {saveStatus === 'error' && <span style={{ fontSize: 12, color: s.red, fontWeight: 600 }}>Save failed</span>}
+          <select value={selectedPeriod} onChange={e => setSelectedPeriod(e.target.value)} style={{ ...input, width: 240 }}>
+            {PAY_PERIODS.map(p => <option key={p.start} value={p.start}>{p.label}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Detective tabs */}
+      <div style={{ ...card, padding: '12px 16px', display: 'flex', gap: 6, overflowX: 'auto' }}>
+        {dets.map(d => {
+          const isActive = String(d.id) === String(selectedDetId)
+          return (
+            <button key={d.id} onClick={() => setSelectedDetId(String(d.id))} style={{
+              ...btn, padding: '6px 14px', fontSize: 13, whiteSpace: 'nowrap',
+              background: isActive ? s.navy : s.gray100,
+              color: isActive ? s.white : s.gray700,
+              border: `1px solid ${isActive ? s.navy : s.gray300}`,
+            }}>
+              {d.name.split(' ').pop()}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Grid */}
+      {loading ? (
+        <div style={{ ...card, textAlign: 'center', padding: 40 }}>
+          <p style={{ color: s.gray500 }}>Loading timesheet...</p>
+        </div>
+      ) : gridData ? (
+        <>
+          <div style={{ ...card, overflow: 'auto', padding: 16 }}>
+            <table style={{ borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr>
+                  <th style={{ ...th, minWidth: 54, position: 'sticky', left: 0, background: s.white, zIndex: 1 }}>Code</th>
+                  {dayHeaders.map((h, i) => (
+                    <th key={i} style={{ ...th, textAlign: 'center', minWidth: 56, padding: '6px 3px' }}>{h}</th>
+                  ))}
+                  <th style={{ ...th, textAlign: 'center', minWidth: 50 }}>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* RG row */}
+                <tr style={{ background: s.white }}>
+                  <td style={stickyTd(s.white)}>RG</td>
+                  {gridData.map((d, di) => (
+                    <td key={di} style={{ ...td, textAlign: 'center', padding: '4px 2px' }}>
+                      <input type="number" step="any"
+                        value={d.reg_hours || ''}
+                        onChange={e => updateCell(di, 'reg_hours', e.target.value === '' ? 0 : Number(e.target.value))}
+                        style={cellInput}
+                      />
+                    </td>
+                  ))}
+                  <td style={{ ...td, textAlign: 'center', fontWeight: 700, color: s.navy }}>{rowTotals.rg || ''}</td>
+                </tr>
+                {/* OT row */}
+                <tr style={{ background: s.gray100 }}>
+                  <td style={stickyTd(s.gray100)}>OT</td>
+                  {gridData.map((d, di) => (
+                    <td key={di} style={{ ...td, textAlign: 'center', padding: '4px 2px' }}>
+                      <input type="number" step="any"
+                        value={d.ot_hours || ''}
+                        onChange={e => updateCell(di, 'ot_hours', e.target.value === '' ? 0 : Number(e.target.value))}
+                        style={cellInput}
+                      />
+                    </td>
+                  ))}
+                  <td style={{ ...td, textAlign: 'center', fontWeight: 700, color: s.navy }}>{rowTotals.ot || ''}</td>
+                </tr>
+                {/* Code rows */}
+                {Array.from({ length: NUM_CODE_ROWS }, (_, ci) => {
+                  const bg = ci % 2 === 0 ? s.white : s.gray100
+                  const codeVal = gridData[0]?.code_rows[ci]?.code || ''
+                  const codeInvalid = codeVal && !PAYROLL_CODES.has(codeVal.toUpperCase().trim())
+                  return (
+                    <tr key={`code-${ci}`} style={{ background: bg }}>
+                      <td style={{ ...td, padding: '4px 2px', position: 'sticky', left: 0, background: bg, zIndex: 1 }}>
+                        <input
+                          value={codeVal}
+                          onChange={e => updateCodeName(ci, e.target.value.toUpperCase())}
+                          onBlur={e => updateCodeName(ci, e.target.value.toUpperCase().trim())}
+                          style={{ ...codeInput, background: codeInvalid ? '#fef3c7' : s.white }}
+                          maxLength={3}
+                          placeholder="—"
+                        />
+                      </td>
+                      {gridData.map((d, di) => (
+                        <td key={di} style={{ ...td, textAlign: 'center', padding: '4px 2px' }}>
+                          <input type="number" step="any"
+                            value={d.code_rows[ci]?.hours || ''}
+                            onChange={e => updateCell(di, 'code_hours', e.target.value === '' ? 0 : Number(e.target.value), ci)}
+                            style={cellInput}
+                          />
+                        </td>
+                      ))}
+                      <td style={{ ...td, textAlign: 'center', fontWeight: 700, color: s.navy }}>{rowTotals.codes[ci] || ''}</td>
+                    </tr>
+                  )
+                })}
+                {/* Total row */}
+                <tr style={{ background: s.amberLight, fontWeight: 700 }}>
+                  <td style={stickyTd(s.amberLight)}>TOTAL</td>
+                  {colTotals.map((t, i) => (
+                    <td key={i} style={{ ...td, textAlign: 'center', fontWeight: 700, color: s.navy }}>{t || ''}</td>
+                  ))}
+                  <td style={{ ...td, textAlign: 'center', fontWeight: 800, color: s.navy }}>{grandTotal || ''}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          {/* Action buttons */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <button onClick={handleReset} style={btnSecondary}>Start Over</button>
+            <button onClick={handleExport} style={btnPrimary}>Export to Excel</button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   12. SUPERVISOR VIEW — wraps all supervisor tabs
+   ═══════════════════════════════════════════════════════════════════ */
+
+function SupervisorView({ detectives, user }) {
   const [tab, setTab] = useState('dashboard')
+
+  const tabs = [
+    { key: 'dashboard', label: 'Dashboard' },
+    { key: 'weekly', label: 'Weekly View' },
+    ...(user.can_access_payroll ? [{ key: 'payroll', label: 'Payroll' }] : []),
+  ]
 
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-        {[
-          { key: 'dashboard', label: 'Dashboard' },
-          { key: 'weekly', label: 'Weekly View' },
-        ].map(t => (
+        {tabs.map(t => (
           <button key={t.key} style={btnTab(tab === t.key)} onClick={() => setTab(t.key)}>
             {t.label}
           </button>
@@ -1327,6 +1720,7 @@ function SupervisorView({ detectives }) {
 
       {tab === 'dashboard' && <Dashboard />}
       {tab === 'weekly' && <WeeklyDetailView detectives={detectives} />}
+      {tab === 'payroll' && <PayrollView detectives={detectives} />}
     </div>
   )
 }
@@ -1391,7 +1785,7 @@ export default function App() {
       {/* Main content */}
       <main style={{ maxWidth: 1200, margin: '0 auto', padding: 24 }}>
         {isSupervisor
-          ? <SupervisorView detectives={allUsers} />
+          ? <SupervisorView detectives={allUsers} user={user} />
           : <DetectiveView user={user} />
         }
       </main>
