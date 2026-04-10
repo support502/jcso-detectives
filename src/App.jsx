@@ -10,6 +10,8 @@ import {
   updateUserSignature,
   fetchTimeOffRequestsForUser, createTimeOffRequest, updateTimeOffRequest, deleteTimeOffRequest,
   fetchOvertimeRequestsForUser, createOvertimeRequest, updateOvertimeRequest, deleteOvertimeRequest,
+  fetchPendingRequests, approveTimeOffRequest, approveOvertimeRequest,
+  denyTimeOffRequest, denyOvertimeRequest,
 } from './supabase'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1140,6 +1142,373 @@ function TimeSlipsView({ user, requireSignature }) {
           onClose={closeForm}
           onSaved={() => { closeForm(); loadRequests() }}
         />
+      )}
+    </>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   6c. PENDING REQUESTS — supervisor approval queue
+   ═══════════════════════════════════════════════════════════════════ */
+
+function canCurrentUserApprove(_request, submitter, currentUser) {
+  if (!submitter) return false
+  // Detective (non-supervisor): any supervisor can approve
+  if (submitter.role !== 'supervisor') return true
+  // Supervisor (sergeant or captain): only the captain can approve
+  return currentUser.is_captain === true
+}
+
+function PendingRequestsView({ user, requireSignature }) {
+  const [requests, setRequests] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [approveTarget, setApproveTarget] = useState(null)
+  const [denyTarget, setDenyTarget] = useState(null)
+  const [denyReason, setDenyReason] = useState('')
+  const [feedback, setFeedback] = useState('')
+  const [processing, setProcessing] = useState(false)
+  const [checkStaffOfficer, setCheckStaffOfficer] = useState(false)
+  const [checkDeptHead, setCheckDeptHead] = useState(false)
+
+  useEffect(() => { loadPending() }, [])
+
+  async function loadPending() {
+    setLoading(true)
+    try {
+      const data = await fetchPendingRequests()
+      setRequests(data)
+    } catch { /* ignore */ }
+    setLoading(false)
+  }
+
+  function showFeedback(msg) {
+    setFeedback(msg)
+    setTimeout(() => setFeedback(''), 3000)
+  }
+
+  function openApprove(row) {
+    if (row._type === 'ot') {
+      setCheckStaffOfficer(true)
+      setCheckDeptHead(user.is_captain === true)
+    }
+    setApproveTarget(row)
+  }
+
+  function closeApprove() {
+    setApproveTarget(null)
+    setCheckStaffOfficer(false)
+    setCheckDeptHead(false)
+  }
+
+  async function handleConfirmApprove() {
+    if (!approveTarget) return
+    try { await requireSignature() } catch { return }
+    if (approveTarget._type === 'ot' && !checkStaffOfficer && !checkDeptHead) return
+    setProcessing(true)
+    try {
+      if (approveTarget._type === 'timeoff') {
+        await approveTimeOffRequest(approveTarget.id, user.id)
+      } else {
+        await approveOvertimeRequest(approveTarget.id, {
+          staffOfficerUserId: checkStaffOfficer ? user.id : null,
+          deptHeadUserId: checkDeptHead ? user.id : null,
+        })
+      }
+      closeApprove()
+      showFeedback('Approved')
+      loadPending()
+    } catch (e) {
+      alert('Failed to approve: ' + (e.message || 'Unknown error'))
+    }
+    setProcessing(false)
+  }
+
+  function openDeny(row) {
+    setDenyReason('')
+    setDenyTarget(row)
+  }
+
+  function closeDeny() {
+    setDenyTarget(null)
+    setDenyReason('')
+  }
+
+  async function handleConfirmDeny() {
+    if (!denyTarget || !denyReason.trim()) return
+    setProcessing(true)
+    try {
+      if (denyTarget._type === 'timeoff') {
+        await denyTimeOffRequest(denyTarget.id, denyReason.trim())
+      } else {
+        await denyOvertimeRequest(denyTarget.id, denyReason.trim())
+      }
+      closeDeny()
+      showFeedback('Denied')
+      loadPending()
+    } catch (e) {
+      alert('Failed to deny: ' + (e.message || 'Unknown error'))
+    }
+    setProcessing(false)
+  }
+
+  async function handleDelete(row) {
+    const msg = row.status !== 'pending'
+      ? `This request has already been ${row.status}. Deleting will permanently remove it from the system. If it was approved, any related payroll entries will need to be reverted manually. Continue?`
+      : 'Permanently delete this request?'
+    if (!confirm(msg)) return
+    try {
+      if (row._type === 'timeoff') await deleteTimeOffRequest(row.id)
+      else await deleteOvertimeRequest(row.id)
+      loadPending()
+    } catch { alert('Failed to delete request.') }
+  }
+
+  const otCheckValid = approveTarget?._type === 'ot' ? (checkStaffOfficer || checkDeptHead) : true
+
+  return (
+    <>
+      {feedback && (
+        <div style={{ ...card, background: '#dcfce7', border: '1px solid #86efac', textAlign: 'center', color: '#166534', fontWeight: 600, fontSize: 14 }}>
+          {feedback}
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ color: s.gray500, fontSize: 14, padding: 8 }}>Loading...</div>
+      ) : requests.length === 0 ? (
+        <div style={{ ...card, textAlign: 'center', color: s.gray500, padding: 40 }}>
+          No pending requests.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {requests.map(row => {
+            const isTO = row._type === 'timeoff'
+            const canApprove = canCurrentUserApprove(row, row.submitter, user)
+            const approveTooltip = !canApprove
+              ? (row.submitter?.is_captain
+                ? 'Only the captain can approve their own slip'
+                : 'Only the captain can approve supervisor slips')
+              : ''
+
+            return (
+              <div key={`${row._type}-${row.id}`} style={{ ...card, marginBottom: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                  {/* Submitter name */}
+                  <div style={{ fontWeight: 700, fontSize: 15, color: s.navy, minWidth: 140 }}>
+                    {row.submitter?.name || 'Unknown'}
+                  </div>
+
+                  {/* Type badge */}
+                  <span style={{
+                    background: isTO ? '#dbeafe' : '#ede9fe',
+                    color: isTO ? '#1e40af' : '#5b21b6',
+                    padding: '2px 8px', borderRadius: 4,
+                    fontSize: 11, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap',
+                  }}>
+                    {isTO ? 'Time Off' : 'Overtime'}
+                  </span>
+
+                  {/* Key fields */}
+                  <div style={{ flex: 1, minWidth: 160 }}>
+                    {isTO ? (
+                      <div style={{ fontSize: 14, color: s.gray900 }}>
+                        <strong>{row.type}</strong>
+                        {row.type === 'Other' && row.other_code ? ` — ${row.other_code}` : ''}
+                        {' · '}
+                        <strong>{row.hours}</strong> {row.hours === 1 ? 'hr' : 'hrs'}
+                        {row.dates_picked?.length > 0
+                          ? ` · ${fmtShortDate(row.dates_picked[0])}${row.dates_picked.length > 1 ? ` +${row.dates_picked.length - 1}` : ''}`
+                          : ''}
+                        {row.dates_notes ? <span style={{ color: s.gray500 }}> · {row.dates_notes}</span> : ''}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 14, color: s.gray900 }}>
+                        <strong>{fmtShortDate(row.date_worked)}</strong>
+                        {' · '}
+                        <strong>{row.hours_worked}</strong> {row.hours_worked === 1 ? 'hr' : 'hrs'}
+                        {row.purpose
+                          ? <span style={{ color: s.gray500 }}> · {row.purpose.length > 50 ? row.purpose.slice(0, 50) + '…' : row.purpose}</span>
+                          : ''}
+                        {row.payment_or_comp
+                          ? <span style={{ color: s.gray500 }}> · {row.payment_or_comp}</span>
+                          : ''}
+                        {row.grade
+                          ? <span style={{ color: s.gray500 }}> · Grade: {row.grade}</span>
+                          : ''}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11, color: s.gray500, marginTop: 3 }}>
+                      Submitted {fmtDateTime(row.created_at)}
+                    </div>
+                  </div>
+
+                  {/* Action buttons */}
+                  <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+                    <button
+                      onClick={() => openApprove(row)}
+                      disabled={!canApprove}
+                      title={approveTooltip}
+                      style={{
+                        ...btnPrimary, padding: '4px 12px', fontSize: 13,
+                        opacity: canApprove ? 1 : 0.4,
+                        cursor: canApprove ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      Approve
+                    </button>
+                    <button onClick={() => openDeny(row)}
+                      style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13, color: s.red }}>
+                      Deny
+                    </button>
+                    <button onClick={() => handleDelete(row)}
+                      style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Approve Modal */}
+      {approveTarget && (
+        <ModalWrap>
+          <h2 style={{ margin: '0 0 6px', fontSize: 20, color: s.navy }}>Approve Request</h2>
+
+          {/* Summary */}
+          <div style={{ background: s.gray100, borderRadius: s.radius, padding: 16, marginBottom: 20, fontSize: 14, color: s.gray700 }}>
+            <div><strong>Submitted by:</strong> {approveTarget.submitter?.name || 'Unknown'}</div>
+            {approveTarget._type === 'timeoff' ? (
+              <>
+                <div><strong>Type:</strong> {approveTarget.type}{approveTarget.type === 'Other' && approveTarget.other_code ? ` — ${approveTarget.other_code}` : ''}</div>
+                <div><strong>Hours:</strong> {approveTarget.hours}</div>
+                {approveTarget.dates_picked?.length > 0 && (
+                  <div><strong>Dates:</strong> {approveTarget.dates_picked.map(d => fmtShortDate(d)).join(', ')}</div>
+                )}
+                {approveTarget.dates_notes && <div><strong>Notes:</strong> {approveTarget.dates_notes}</div>}
+              </>
+            ) : (
+              <>
+                <div><strong>Date Worked:</strong> {fmtShortDate(approveTarget.date_worked)}</div>
+                <div><strong>Hours Worked:</strong> {approveTarget.hours_worked}</div>
+                {approveTarget.purpose && <div><strong>Purpose:</strong> {approveTarget.purpose}</div>}
+                {approveTarget.payment_or_comp && <div><strong>Request:</strong> {approveTarget.payment_or_comp}</div>}
+                {approveTarget.grade && <div><strong>Grade:</strong> {approveTarget.grade}</div>}
+              </>
+            )}
+          </div>
+
+          {/* Signature checkboxes */}
+          <div style={{ marginBottom: 16 }}>
+            <label style={label}>Signature Lines</label>
+            {approveTarget._type === 'timeoff' ? (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: s.gray700, fontWeight: 400, cursor: 'default', marginTop: 4 }}>
+                <input type="checkbox" checked disabled /> Supervisor Signature
+              </label>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: s.gray700, fontWeight: 400, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={checkStaffOfficer} onChange={e => setCheckStaffOfficer(e.target.checked)} />
+                  Staff Officer Signature
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: s.gray700, fontWeight: 400, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={checkDeptHead} onChange={e => setCheckDeptHead(e.target.checked)} />
+                  Department Head Signature
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* Signature preview */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={label}>Your Signature</label>
+            {user.signature_png ? (
+              <div style={{ border: `1px solid ${s.gray200}`, borderRadius: s.radius, background: s.gray100, padding: 12, textAlign: 'center' }}>
+                <img src={user.signature_png} alt="Your signature" style={{ maxWidth: '100%', maxHeight: 100, objectFit: 'contain' }} />
+              </div>
+            ) : (
+              <div style={{ padding: 12, background: '#fef2f2', borderRadius: s.radius, border: '1px solid #fecaca' }}>
+                <p style={{ margin: '0 0 8px', fontSize: 13, color: s.red, fontWeight: 600 }}>
+                  You need to set up your signature before approving.
+                </p>
+                <button onClick={async () => { try { await requireSignature() } catch { /* cancelled */ } }}
+                  style={{ ...btnPrimary, padding: '6px 14px', fontSize: 13 }}>
+                  Set Up Signature
+                </button>
+              </div>
+            )}
+          </div>
+
+          {!otCheckValid && (
+            <p style={{ margin: '0 0 12px', fontSize: 13, color: s.red }}>At least one signature line must be checked.</p>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={closeApprove} style={btnSecondary} disabled={processing}>Cancel</button>
+            <button
+              onClick={handleConfirmApprove}
+              disabled={processing || !otCheckValid || !user.signature_png}
+              style={{
+                ...btnPrimary,
+                opacity: (processing || !otCheckValid || !user.signature_png) ? 0.6 : 1,
+                cursor: (processing || !otCheckValid || !user.signature_png) ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {processing ? 'Approving…' : 'Confirm Approval'}
+            </button>
+          </div>
+        </ModalWrap>
+      )}
+
+      {/* Deny Modal */}
+      {denyTarget && (
+        <ModalWrap>
+          <h2 style={{ margin: '0 0 6px', fontSize: 20, color: s.navy }}>Deny Request</h2>
+
+          {/* Summary */}
+          <div style={{ background: s.gray100, borderRadius: s.radius, padding: 16, marginBottom: 20, fontSize: 14, color: s.gray700 }}>
+            <div><strong>Submitted by:</strong> {denyTarget.submitter?.name || 'Unknown'}</div>
+            {denyTarget._type === 'timeoff' ? (
+              <>
+                <div><strong>Type:</strong> {denyTarget.type}{denyTarget.type === 'Other' && denyTarget.other_code ? ` — ${denyTarget.other_code}` : ''}</div>
+                <div><strong>Hours:</strong> {denyTarget.hours}</div>
+              </>
+            ) : (
+              <>
+                <div><strong>Date Worked:</strong> {fmtShortDate(denyTarget.date_worked)}</div>
+                <div><strong>Hours Worked:</strong> {denyTarget.hours_worked}</div>
+                {denyTarget.purpose && <div><strong>Purpose:</strong> {denyTarget.purpose}</div>}
+              </>
+            )}
+          </div>
+
+          <div style={{ marginBottom: 20 }}>
+            <label style={label}>Reason for Denial *</label>
+            <textarea
+              value={denyReason}
+              onChange={e => setDenyReason(e.target.value)}
+              placeholder="Explain why this request is being denied…"
+              style={{ ...input, height: 80, resize: 'vertical' }}
+            />
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={closeDeny} style={btnSecondary} disabled={processing}>Cancel</button>
+            <button
+              onClick={handleConfirmDeny}
+              disabled={processing || !denyReason.trim()}
+              style={{
+                ...btn, background: s.red, color: s.white,
+                opacity: (processing || !denyReason.trim()) ? 0.6 : 1,
+                cursor: (processing || !denyReason.trim()) ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {processing ? 'Denying…' : 'Confirm Denial'}
+            </button>
+          </div>
+        </ModalWrap>
       )}
     </>
   )
@@ -2420,12 +2789,14 @@ function PdfMergerView() {
    12. SUPERVISOR VIEW — wraps all supervisor tabs
    ═══════════════════════════════════════════════════════════════════ */
 
-function SupervisorView({ detectives, user }) {
+function SupervisorView({ detectives, user, requireSignature }) {
   const [tab, setTab] = useState('dashboard')
 
   const tabs = [
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'weekly', label: 'Weekly View' },
+    { key: 'pending', label: 'Pending Requests' },
+    { key: 'timeslips', label: 'Time Slips' },
     ...(user.can_access_payroll ? [{ key: 'payroll', label: 'Payroll' }] : []),
     ...(user.can_access_payroll ? [{ key: 'pdf_merger', label: 'PDF Merger' }] : []),
   ]
@@ -2442,6 +2813,8 @@ function SupervisorView({ detectives, user }) {
 
       {tab === 'dashboard' && <Dashboard />}
       {tab === 'weekly' && <WeeklyDetailView detectives={detectives} />}
+      {tab === 'pending' && <PendingRequestsView user={user} requireSignature={requireSignature} />}
+      {tab === 'timeslips' && <TimeSlipsView user={user} requireSignature={requireSignature} />}
       {tab === 'payroll' && <PayrollView detectives={detectives} />}
       {tab === 'pdf_merger' && <PdfMergerView />}
     </div>
@@ -2752,7 +3125,7 @@ export default function App() {
       {/* Main content */}
       <main style={{ maxWidth: 1200, margin: '0 auto', padding: 24 }}>
         {isSupervisor
-          ? <SupervisorView detectives={allUsers} user={user} />
+          ? <SupervisorView detectives={allUsers} user={user} requireSignature={requireSignature} />
           : <DetectiveView user={user} requireSignature={requireSignature} />
         }
       </main>

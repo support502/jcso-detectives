@@ -243,3 +243,116 @@ export async function fetchMonthEntries(month, year) {
   if (error) throw error
   return data
 }
+
+/* ─── Pending Requests (Supervisor approval queue) ─── */
+
+export async function fetchPendingRequests() {
+  const [timeOffRes, otRes] = await Promise.all([
+    supabase
+      .from('time_off_requests')
+      .select('*')
+      .eq('status', 'pending')
+      .eq('deleted', false)
+      .order('created_at', { ascending: true }),
+    supabase
+      .from('overtime_requests')
+      .select('*')
+      .eq('status', 'pending')
+      .eq('deleted', false)
+      .order('created_at', { ascending: true }),
+  ])
+  if (timeOffRes.error) throw timeOffRes.error
+  if (otRes.error) throw otRes.error
+
+  // Collect unique user_ids and fetch submitter info
+  const userIds = [...new Set([
+    ...timeOffRes.data.map(r => r.user_id),
+    ...otRes.data.map(r => r.user_id),
+  ])]
+
+  let usersMap = {}
+  if (userIds.length > 0) {
+    const { data: users, error: usersError } = await supabase
+      .from('det_users')
+      .select('id, name, role, is_captain')
+      .in('id', userIds)
+    if (usersError) throw usersError
+    for (const u of users) usersMap[u.id] = u
+  }
+
+  const combined = [
+    ...timeOffRes.data.map(r => ({ ...r, _type: 'timeoff', submitter: usersMap[r.user_id] || null })),
+    ...otRes.data.map(r => ({ ...r, _type: 'ot', submitter: usersMap[r.user_id] || null })),
+  ].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+
+  return combined
+}
+
+export async function approveTimeOffRequest(requestId, supervisorUserId) {
+  const { data, error } = await supabase
+    .from('time_off_requests')
+    .update({
+      status: 'approved',
+      supervisor_signed_at: new Date().toISOString(),
+      supervisor_user_id: supervisorUserId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', requestId)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
+export async function approveOvertimeRequest(requestId, { staffOfficerUserId, deptHeadUserId }) {
+  const payload = {
+    status: 'approved',
+    updated_at: new Date().toISOString(),
+  }
+  if (staffOfficerUserId) {
+    payload.staff_officer_signed_at = new Date().toISOString()
+    payload.staff_officer_user_id = staffOfficerUserId
+  }
+  if (deptHeadUserId) {
+    payload.dept_head_signed_at = new Date().toISOString()
+    payload.dept_head_user_id = deptHeadUserId
+  }
+  const { data, error } = await supabase
+    .from('overtime_requests')
+    .update(payload)
+    .eq('id', requestId)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
+export async function denyTimeOffRequest(requestId, reason) {
+  const { data, error } = await supabase
+    .from('time_off_requests')
+    .update({
+      status: 'denied',
+      deny_reason: reason,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', requestId)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
+export async function denyOvertimeRequest(requestId, reason) {
+  const { data, error } = await supabase
+    .from('overtime_requests')
+    .update({
+      status: 'denied',
+      deny_reason: reason,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', requestId)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
