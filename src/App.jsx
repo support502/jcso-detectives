@@ -1369,9 +1369,7 @@ function PayrollView({ detectives }) {
   const [selectedPeriod, setSelectedPeriod] = useState(findCurrentPayPeriod)
 
   const dets = useMemo(() => {
-    return detectives
-      .filter(d => d.role !== 'supervisor')
-      .sort((a, b) => a.name.split(' ').pop().localeCompare(b.name.split(' ').pop()))
+    return [...detectives].sort((a, b) => a.name.split(' ').pop().localeCompare(b.name.split(' ').pop()))
   }, [detectives])
 
   const [selectedDetId, setSelectedDetId] = useState('')
@@ -1733,11 +1731,24 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [allUsers, setAllUsers] = useState([])
 
-  // Restore session from localStorage
+  // Restore session from localStorage, then re-fetch the user row from DB
+  // to pick up any new columns (e.g. can_access_payroll) added after the session was cached.
   useEffect(() => {
     const saved = localStorage.getItem('jcso_det_user')
     if (saved) {
-      try { setUser(JSON.parse(saved)) } catch {}
+      try {
+        const cached = JSON.parse(saved)
+        setUser(cached)
+        // Refresh the row so new columns like can_access_payroll are always current
+        supabase.from('det_users').select('*').eq('id', cached.id).single()
+          .then(({ data }) => {
+            if (data) {
+              setUser(data)
+              localStorage.setItem('jcso_det_user', JSON.stringify(data))
+            }
+          })
+          .catch(() => {})
+      } catch {}
     }
     // Fetch all users for supervisor views
     fetchUsers().then(setAllUsers).catch(() => {})
