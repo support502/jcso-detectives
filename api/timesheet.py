@@ -127,6 +127,8 @@ def _pull_from_entries(user_id, pp_start):
         ot = max(total_hours - 8.0, 0.0)
 
         code_rows = []
+        if ot > 0:
+            code_rows.append({'code': 'OT', 'hours': ot})
         if day in holidays:
             code_rows.append({'code': 'HL', 'hours': 8.0})
 
@@ -135,7 +137,7 @@ def _pull_from_entries(user_id, pp_start):
             'pay_period_start': pp_start,
             'day_date': day_str,
             'reg_hours': reg,
-            'ot_hours': ot,
+            'ot_hours': 0,
             'code_rows': code_rows,
             'auto_populated': True,
         })
@@ -186,7 +188,7 @@ def action_save(body):
             'pay_period_start': pp_start,
             'day_date': d['day_date'],
             'reg_hours': float(d.get('reg_hours', 0)),
-            'ot_hours': float(d.get('ot_hours', 0)),
+            'ot_hours': 0,
             'code_rows': d.get('code_rows', []),
             'auto_populated': False,
         })
@@ -261,12 +263,9 @@ def action_export(body):
     ws[f'Q{BLOCK1_RG_ROW}'] = rg_total
     ws[f'R{BLOCK1_RG_ROW}'] = 'RG'
 
-    # ── Gather extra code rows (OT + any code_rows from each day) ──
-    # Collect all unique codes in order of appearance, OT first if present
-    has_ot = any(float(tr.get('ot_hours', 0)) > 0 for tr in ts_rows)
+    # ── Gather code rows (OT, HL, etc. — all live in code_rows now) ──
+    # Collect all unique codes in order of appearance
     code_order = []
-    if has_ot:
-        code_order.append('OT')
     for tr in ts_rows:
         for cr in (tr.get('code_rows') or []):
             code = cr.get('code', '')
@@ -276,8 +275,6 @@ def action_export(body):
     # Build per-code day arrays
     code_days = {c: [0.0] * 14 for c in code_order}
     for i, tr in enumerate(ts_rows):
-        if has_ot:
-            code_days['OT'][i] = float(tr.get('ot_hours', 0))
         for cr in (tr.get('code_rows') or []):
             code = cr.get('code', '')
             hrs = float(cr.get('hours', 0))

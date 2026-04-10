@@ -1359,7 +1359,6 @@ function normalizeTimesheetGrid(rows) {
     return {
       ...r,
       reg_hours: Number(r.reg_hours) || 0,
-      ot_hours: Number(r.ot_hours) || 0,
       code_rows: normalizedCodes,
     }
   })
@@ -1420,7 +1419,6 @@ function PayrollView({ detectives }) {
         if (i !== dayIndex) return d
         const day = { ...d }
         if (field === 'reg_hours') day.reg_hours = value
-        else if (field === 'ot_hours') day.ot_hours = value
         else if (field === 'code') {
           day.code_rows = day.code_rows.map((cr, ci) => ci === codeRowIndex ? { ...cr, code: value } : cr)
         } else if (field === 'code_hours') {
@@ -1465,7 +1463,6 @@ function PayrollView({ detectives }) {
           days: data.map(d => ({
             day_date: d.day_date,
             reg_hours: Number(d.reg_hours) || 0,
-            ot_hours: Number(d.ot_hours) || 0,
             code_rows: d.code_rows.filter(cr => cr.code.trim() !== ''),
           })),
         }),
@@ -1535,14 +1532,13 @@ function PayrollView({ detectives }) {
 
   const rowTotals = gridData ? {
     rg: gridData.reduce((sum, d) => sum + (Number(d.reg_hours) || 0), 0),
-    ot: gridData.reduce((sum, d) => sum + (Number(d.ot_hours) || 0), 0),
     codes: Array.from({ length: NUM_CODE_ROWS }, (_, ci) =>
       gridData.reduce((sum, d) => sum + (Number(d.code_rows[ci]?.hours) || 0), 0)
     ),
   } : null
 
   const colTotals = gridData ? gridData.map(d => {
-    let t = (Number(d.reg_hours) || 0) + (Number(d.ot_hours) || 0)
+    let t = (Number(d.reg_hours) || 0)
     for (const cr of d.code_rows) t += (Number(cr.hours) || 0)
     return t
   }) : null
@@ -1626,20 +1622,6 @@ function PayrollView({ detectives }) {
                     </td>
                   ))}
                   <td style={{ ...td, textAlign: 'center', fontWeight: 700, color: s.navy }}>{rowTotals.rg || ''}</td>
-                </tr>
-                {/* OT row */}
-                <tr style={{ background: s.gray100 }}>
-                  <td style={stickyTd(s.gray100)}>OT</td>
-                  {gridData.map((d, di) => (
-                    <td key={di} style={{ ...td, textAlign: 'center', padding: '4px 2px' }}>
-                      <input type="number" step="any"
-                        value={d.ot_hours || ''}
-                        onChange={e => updateCell(di, 'ot_hours', e.target.value === '' ? 0 : Number(e.target.value))}
-                        style={cellInput}
-                      />
-                    </td>
-                  ))}
-                  <td style={{ ...td, textAlign: 'center', fontWeight: 700, color: s.navy }}>{rowTotals.ot || ''}</td>
                 </tr>
                 {/* Code rows */}
                 {Array.from({ length: NUM_CODE_ROWS }, (_, ci) => {
