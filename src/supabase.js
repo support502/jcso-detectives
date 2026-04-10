@@ -283,9 +283,30 @@ export async function fetchPendingRequests() {
   const combined = [
     ...timeOffRes.data.map(r => ({ ...r, _type: 'timeoff', submitter: usersMap[r.user_id] || null })),
     ...otRes.data.map(r => ({ ...r, _type: 'ot', submitter: usersMap[r.user_id] || null })),
-  ].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+  ]
+    .filter(r => r.submitter?.is_captain !== true)   // captain slips not approved in-app
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
 
   return combined
+}
+
+export async function fetchPendingCount() {
+  const { data: nonCaptains, error: ncErr } = await supabase
+    .from('det_users')
+    .select('id')
+    .not('is_captain', 'eq', true)
+  if (ncErr) throw ncErr
+  const ids = nonCaptains.map(u => u.id)
+  if (ids.length === 0) return 0
+  const [toRes, otRes] = await Promise.all([
+    supabase.from('time_off_requests')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending').eq('deleted', false).in('user_id', ids),
+    supabase.from('overtime_requests')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending').eq('deleted', false).in('user_id', ids),
+  ])
+  return (toRes.count || 0) + (otRes.count || 0)
 }
 
 export async function approveTimeOffRequest(requestId, supervisorUserId) {

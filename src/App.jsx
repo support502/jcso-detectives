@@ -10,7 +10,8 @@ import {
   updateUserSignature,
   fetchTimeOffRequestsForUser, createTimeOffRequest, updateTimeOffRequest, deleteTimeOffRequest,
   fetchOvertimeRequestsForUser, createOvertimeRequest, updateOvertimeRequest, deleteOvertimeRequest,
-  fetchPendingRequests, approveTimeOffRequest, approveOvertimeRequest,
+  fetchPendingRequests, fetchPendingCount,
+  approveTimeOffRequest, approveOvertimeRequest,
   denyTimeOffRequest, denyOvertimeRequest,
 } from './supabase'
 
@@ -217,6 +218,17 @@ const td = {
   borderBottom: `1px solid ${s.gray100}`,
   whiteSpace: 'nowrap',
 }
+
+// Inject keyframe CSS for the pending-requests tab pulse animation
+;(() => {
+  if (typeof document === 'undefined') return
+  const id = 'jcso-pulse-kf'
+  if (document.getElementById(id)) return
+  const el = document.createElement('style')
+  el.id = id
+  el.textContent = '@keyframes jcsoPulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.45)}60%{box-shadow:0 0 0 8px rgba(239,68,68,0)}}.jcso-pulse{animation:jcsoPulse 1.5s ease-out 3}'
+  document.head.appendChild(el)
+})()
 
 /* ═══════════════════════════════════════════════════════════════════
    4. LOGIN SCREEN
@@ -1151,15 +1163,7 @@ function TimeSlipsView({ user, requireSignature }) {
    6c. PENDING REQUESTS — supervisor approval queue
    ═══════════════════════════════════════════════════════════════════ */
 
-function canCurrentUserApprove(_request, submitter, currentUser) {
-  if (!submitter) return false
-  // Detective (non-supervisor): any supervisor can approve
-  if (submitter.role !== 'supervisor') return true
-  // Supervisor (sergeant or captain): only the captain can approve
-  return currentUser.is_captain === true
-}
-
-function PendingRequestsView({ user, requireSignature }) {
+function PendingRequestsView({ user, requireSignature, onCountRefresh }) {
   const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
   const [approveTarget, setApproveTarget] = useState(null)
@@ -1167,8 +1171,7 @@ function PendingRequestsView({ user, requireSignature }) {
   const [denyReason, setDenyReason] = useState('')
   const [feedback, setFeedback] = useState('')
   const [processing, setProcessing] = useState(false)
-  const [checkStaffOfficer, setCheckStaffOfficer] = useState(false)
-  const [checkDeptHead, setCheckDeptHead] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(new Set())
 
   useEffect(() => { loadPending() }, [])
 
@@ -1177,8 +1180,10 @@ function PendingRequestsView({ user, requireSignature }) {
     try {
       const data = await fetchPendingRequests()
       setRequests(data)
+      setSelectedIds(new Set())
     } catch { /* ignore */ }
     setLoading(false)
+    onCountRefresh?.()
   }
 
   function showFeedback(msg) {
@@ -1186,35 +1191,25 @@ function PendingRequestsView({ user, requireSignature }) {
     setTimeout(() => setFeedback(''), 3000)
   }
 
-  function openApprove(row) {
-    if (row._type === 'ot') {
-      setCheckStaffOfficer(true)
-      setCheckDeptHead(user.is_captain === true)
+  // Approve a single request using role-based signature line selection
+  async function approveOneRequest(row) {
+    if (row._type === 'timeoff') {
+      await approveTimeOffRequest(row.id, user.id)
+    } else {
+      // Captain signs the Department Head line; everyone else signs Staff Officer
+      const staffOfficerUserId = user.is_captain ? null : user.id
+      const deptHeadUserId = user.is_captain ? user.id : null
+      await approveOvertimeRequest(row.id, { staffOfficerUserId, deptHeadUserId })
     }
-    setApproveTarget(row)
-  }
-
-  function closeApprove() {
-    setApproveTarget(null)
-    setCheckStaffOfficer(false)
-    setCheckDeptHead(false)
   }
 
   async function handleConfirmApprove() {
     if (!approveTarget) return
     try { await requireSignature() } catch { return }
-    if (approveTarget._type === 'ot' && !checkStaffOfficer && !checkDeptHead) return
     setProcessing(true)
     try {
-      if (approveTarget._type === 'timeoff') {
-        await approveTimeOffRequest(approveTarget.id, user.id)
-      } else {
-        await approveOvertimeRequest(approveTarget.id, {
-          staffOfficerUserId: checkStaffOfficer ? user.id : null,
-          deptHeadUserId: checkDeptHead ? user.id : null,
-        })
-      }
-      closeApprove()
+      await approveOneRequest(approveTarget)
+      setApproveTarget(null)
       showFeedback('Approved')
       loadPending()
     } catch (e) {
@@ -1223,15 +1218,22 @@ function PendingRequestsView({ user, requireSignature }) {
     setProcessing(false)
   }
 
-  function openDeny(row) {
-    setDenyReason('')
-    setDenyTarget(row)
+  async function handleBulkApprove() {
+    if (selectedIds.size === 0) return
+    try { await requireSignature() } catch { return }
+    setProcessing(true)
+    const selected = requests.filter(r => selectedIds.has(`${r._type}-${r.id}`))
+    let successCount = 0
+    for (const row of selected) {
+      try { await approveOneRequest(row); successCount++ } catch { /* continue */ }
+    }
+    setProcessing(false)
+    showFeedback(`Approved ${successCount} request${successCount !== 1 ? 's' : ''}`)
+    loadPending()
   }
 
-  function closeDeny() {
-    setDenyTarget(null)
-    setDenyReason('')
-  }
+  function openDeny(row) { setDenyReason(''); setDenyTarget(row) }
+  function closeDeny() { setDenyTarget(null); setDenyReason('') }
 
   async function handleConfirmDeny() {
     if (!denyTarget || !denyReason.trim()) return
@@ -1263,7 +1265,16 @@ function PendingRequestsView({ user, requireSignature }) {
     } catch { alert('Failed to delete request.') }
   }
 
-  const otCheckValid = approveTarget?._type === 'ot' ? (checkStaffOfficer || checkDeptHead) : true
+  function toggleRow(key) {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
+
+  // What signature line will the current user stamp on an OT request?
+  const otSigLine = user.is_captain ? 'Department Head' : 'Staff Officer'
 
   return (
     <>
@@ -1280,96 +1291,122 @@ function PendingRequestsView({ user, requireSignature }) {
           No pending requests.
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {requests.map(row => {
-            const isTO = row._type === 'timeoff'
-            const canApprove = canCurrentUserApprove(row, row.submitter, user)
-            const approveTooltip = !canApprove
-              ? (row.submitter?.is_captain
-                ? 'Only the captain can approve their own slip'
-                : 'Only the captain can approve supervisor slips')
-              : ''
+        <>
+          {/* Bulk action bar */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+            <button onClick={() => setSelectedIds(new Set(requests.map(r => `${r._type}-${r.id}`)))}
+              style={{ ...btnSecondary, padding: '5px 14px', fontSize: 13 }}>
+              Select All
+            </button>
+            <button onClick={() => setSelectedIds(new Set())}
+              style={{ ...btnSecondary, padding: '5px 14px', fontSize: 13 }}>
+              Deselect All
+            </button>
+            <button
+              onClick={handleBulkApprove}
+              disabled={selectedIds.size === 0 || processing}
+              style={{
+                ...btnPrimary, padding: '5px 14px', fontSize: 13,
+                opacity: (selectedIds.size === 0 || processing) ? 0.4 : 1,
+                cursor: (selectedIds.size === 0 || processing) ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {processing ? 'Approving…' : `Approve Selected${selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}`}
+            </button>
+          </div>
 
-            return (
-              <div key={`${row._type}-${row.id}`} style={{ ...card, marginBottom: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
-                  {/* Submitter name */}
-                  <div style={{ fontWeight: 700, fontSize: 15, color: s.navy, minWidth: 140 }}>
-                    {row.submitter?.name || 'Unknown'}
-                  </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {requests.map(row => {
+              const isTO = row._type === 'timeoff'
+              const rowKey = `${row._type}-${row.id}`
+              const isSelected = selectedIds.has(rowKey)
 
-                  {/* Type badge */}
-                  <span style={{
-                    background: isTO ? '#dbeafe' : '#ede9fe',
-                    color: isTO ? '#1e40af' : '#5b21b6',
-                    padding: '2px 8px', borderRadius: 4,
-                    fontSize: 11, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap',
-                  }}>
-                    {isTO ? 'Time Off' : 'Overtime'}
-                  </span>
+              return (
+                <div key={rowKey} style={{
+                  ...card, marginBottom: 0,
+                  border: isSelected ? `2px solid ${s.amber}` : '2px solid transparent',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                    {/* Row checkbox */}
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleRow(rowKey)}
+                      style={{ marginTop: 3, flexShrink: 0, cursor: 'pointer' }}
+                    />
 
-                  {/* Key fields */}
-                  <div style={{ flex: 1, minWidth: 160 }}>
-                    {isTO ? (
-                      <div style={{ fontSize: 14, color: s.gray900 }}>
-                        <strong>{row.type}</strong>
-                        {row.type === 'Other' && row.other_code ? ` — ${row.other_code}` : ''}
-                        {' · '}
-                        <strong>{row.hours}</strong> {row.hours === 1 ? 'hr' : 'hrs'}
-                        {row.dates_picked?.length > 0
-                          ? ` · ${fmtShortDate(row.dates_picked[0])}${row.dates_picked.length > 1 ? ` +${row.dates_picked.length - 1}` : ''}`
-                          : ''}
-                        {row.dates_notes ? <span style={{ color: s.gray500 }}> · {row.dates_notes}</span> : ''}
+                    {/* Submitter name */}
+                    <div style={{ fontWeight: 700, fontSize: 15, color: s.navy, minWidth: 140 }}>
+                      {row.submitter?.name || 'Unknown'}
+                    </div>
+
+                    {/* Type badge */}
+                    <span style={{
+                      background: isTO ? '#dbeafe' : '#ede9fe',
+                      color: isTO ? '#1e40af' : '#5b21b6',
+                      padding: '2px 8px', borderRadius: 4,
+                      fontSize: 11, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap',
+                    }}>
+                      {isTO ? 'Time Off' : 'Overtime'}
+                    </span>
+
+                    {/* Key fields */}
+                    <div style={{ flex: 1, minWidth: 160 }}>
+                      {isTO ? (
+                        <div style={{ fontSize: 14, color: s.gray900 }}>
+                          <strong>{row.type}</strong>
+                          {row.type === 'Other' && row.other_code ? ` — ${row.other_code}` : ''}
+                          {' · '}
+                          <strong>{row.hours}</strong> {row.hours === 1 ? 'hr' : 'hrs'}
+                          {row.dates_picked?.length > 0
+                            ? ` · ${fmtShortDate(row.dates_picked[0])}${row.dates_picked.length > 1 ? ` +${row.dates_picked.length - 1}` : ''}`
+                            : ''}
+                          {row.dates_notes ? <span style={{ color: s.gray500 }}> · {row.dates_notes}</span> : ''}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 14, color: s.gray900 }}>
+                          <strong>{fmtShortDate(row.date_worked)}</strong>
+                          {' · '}
+                          <strong>{row.hours_worked}</strong> {row.hours_worked === 1 ? 'hr' : 'hrs'}
+                          {row.purpose
+                            ? <span style={{ color: s.gray500 }}> · {row.purpose.length > 50 ? row.purpose.slice(0, 50) + '…' : row.purpose}</span>
+                            : ''}
+                          {row.payment_or_comp
+                            ? <span style={{ color: s.gray500 }}> · {row.payment_or_comp}</span>
+                            : ''}
+                          {row.grade
+                            ? <span style={{ color: s.gray500 }}> · Grade: {row.grade}</span>
+                            : ''}
+                        </div>
+                      )}
+                      <div style={{ fontSize: 11, color: s.gray500, marginTop: 3 }}>
+                        Submitted {fmtDateTime(row.created_at)}
                       </div>
-                    ) : (
-                      <div style={{ fontSize: 14, color: s.gray900 }}>
-                        <strong>{fmtShortDate(row.date_worked)}</strong>
-                        {' · '}
-                        <strong>{row.hours_worked}</strong> {row.hours_worked === 1 ? 'hr' : 'hrs'}
-                        {row.purpose
-                          ? <span style={{ color: s.gray500 }}> · {row.purpose.length > 50 ? row.purpose.slice(0, 50) + '…' : row.purpose}</span>
-                          : ''}
-                        {row.payment_or_comp
-                          ? <span style={{ color: s.gray500 }}> · {row.payment_or_comp}</span>
-                          : ''}
-                        {row.grade
-                          ? <span style={{ color: s.gray500 }}> · Grade: {row.grade}</span>
-                          : ''}
-                      </div>
-                    )}
-                    <div style={{ fontSize: 11, color: s.gray500, marginTop: 3 }}>
-                      Submitted {fmtDateTime(row.created_at)}
+                    </div>
+
+                    {/* Action buttons */}
+                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+                      <button
+                        onClick={() => setApproveTarget(row)}
+                        style={{ ...btnPrimary, padding: '4px 12px', fontSize: 13 }}
+                      >
+                        Approve
+                      </button>
+                      <button onClick={() => openDeny(row)}
+                        style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13, color: s.red }}>
+                        Deny
+                      </button>
+                      <button onClick={() => handleDelete(row)}
+                        style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
+                        Delete
+                      </button>
                     </div>
                   </div>
-
-                  {/* Action buttons */}
-                  <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
-                    <button
-                      onClick={() => openApprove(row)}
-                      disabled={!canApprove}
-                      title={approveTooltip}
-                      style={{
-                        ...btnPrimary, padding: '4px 12px', fontSize: 13,
-                        opacity: canApprove ? 1 : 0.4,
-                        cursor: canApprove ? 'pointer' : 'not-allowed',
-                      }}
-                    >
-                      Approve
-                    </button>
-                    <button onClick={() => openDeny(row)}
-                      style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13, color: s.red }}>
-                      Deny
-                    </button>
-                    <button onClick={() => handleDelete(row)}
-                      style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
-                      Delete
-                    </button>
-                  </div>
                 </div>
-              </div>
-            )
-          })}
-        </div>
+              )
+            })}
+          </div>
+        </>
       )}
 
       {/* Approve Modal */}
@@ -1378,7 +1415,7 @@ function PendingRequestsView({ user, requireSignature }) {
           <h2 style={{ margin: '0 0 6px', fontSize: 20, color: s.navy }}>Approve Request</h2>
 
           {/* Summary */}
-          <div style={{ background: s.gray100, borderRadius: s.radius, padding: 16, marginBottom: 20, fontSize: 14, color: s.gray700 }}>
+          <div style={{ background: s.gray100, borderRadius: s.radius, padding: 16, marginBottom: 16, fontSize: 14, color: s.gray700 }}>
             <div><strong>Submitted by:</strong> {approveTarget.submitter?.name || 'Unknown'}</div>
             {approveTarget._type === 'timeoff' ? (
               <>
@@ -1400,25 +1437,10 @@ function PendingRequestsView({ user, requireSignature }) {
             )}
           </div>
 
-          {/* Signature checkboxes */}
-          <div style={{ marginBottom: 16 }}>
-            <label style={label}>Signature Lines</label>
-            {approveTarget._type === 'timeoff' ? (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: s.gray700, fontWeight: 400, cursor: 'default', marginTop: 4 }}>
-                <input type="checkbox" checked disabled /> Supervisor Signature
-              </label>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: s.gray700, fontWeight: 400, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={checkStaffOfficer} onChange={e => setCheckStaffOfficer(e.target.checked)} />
-                  Staff Officer Signature
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: s.gray700, fontWeight: 400, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={checkDeptHead} onChange={e => setCheckDeptHead(e.target.checked)} />
-                  Department Head Signature
-                </label>
-              </div>
-            )}
+          {/* Which signature line will be stamped */}
+          <div style={{ marginBottom: 16, fontSize: 14, color: s.gray700 }}>
+            <strong>Signing as:</strong>{' '}
+            {approveTarget._type === 'timeoff' ? 'Supervisor' : otSigLine}
           </div>
 
           {/* Signature preview */}
@@ -1441,19 +1463,15 @@ function PendingRequestsView({ user, requireSignature }) {
             )}
           </div>
 
-          {!otCheckValid && (
-            <p style={{ margin: '0 0 12px', fontSize: 13, color: s.red }}>At least one signature line must be checked.</p>
-          )}
-
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button onClick={closeApprove} style={btnSecondary} disabled={processing}>Cancel</button>
+            <button onClick={() => setApproveTarget(null)} style={btnSecondary} disabled={processing}>Cancel</button>
             <button
               onClick={handleConfirmApprove}
-              disabled={processing || !otCheckValid || !user.signature_png}
+              disabled={processing || !user.signature_png}
               style={{
                 ...btnPrimary,
-                opacity: (processing || !otCheckValid || !user.signature_png) ? 0.6 : 1,
-                cursor: (processing || !otCheckValid || !user.signature_png) ? 'not-allowed' : 'pointer',
+                opacity: (processing || !user.signature_png) ? 0.6 : 1,
+                cursor: (processing || !user.signature_png) ? 'not-allowed' : 'pointer',
               }}
             >
               {processing ? 'Approving…' : 'Confirm Approval'}
@@ -1467,7 +1485,6 @@ function PendingRequestsView({ user, requireSignature }) {
         <ModalWrap>
           <h2 style={{ margin: '0 0 6px', fontSize: 20, color: s.navy }}>Deny Request</h2>
 
-          {/* Summary */}
           <div style={{ background: s.gray100, borderRadius: s.radius, padding: 16, marginBottom: 20, fontSize: 14, color: s.gray700 }}>
             <div><strong>Submitted by:</strong> {denyTarget.submitter?.name || 'Unknown'}</div>
             {denyTarget._type === 'timeoff' ? (
@@ -2791,6 +2808,29 @@ function PdfMergerView() {
 
 function SupervisorView({ detectives, user, requireSignature }) {
   const [tab, setTab] = useState('dashboard')
+  const [pendingCount, setPendingCount] = useState(0)
+  const [pulseKey, setPulseKey] = useState(0)
+  const prevCountRef = useRef(0)
+
+  async function refreshCount() {
+    try {
+      const count = await fetchPendingCount()
+      if (count > prevCountRef.current) setPulseKey(k => k + 1)
+      prevCountRef.current = count
+      setPendingCount(count)
+    } catch { /* ignore */ }
+  }
+
+  useEffect(() => {
+    refreshCount()
+    window.addEventListener('focus', refreshCount)
+    return () => window.removeEventListener('focus', refreshCount)
+  }, [])
+
+  function handleTabClick(key) {
+    setTab(key)
+    refreshCount()
+  }
 
   const tabs = [
     { key: 'dashboard', label: 'Dashboard' },
@@ -2804,16 +2844,34 @@ function SupervisorView({ detectives, user, requireSignature }) {
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
-        {tabs.map(t => (
-          <button key={t.key} style={btnTab(tab === t.key)} onClick={() => setTab(t.key)}>
-            {t.label}
-          </button>
-        ))}
+        {tabs.map(t => {
+          const isPending = t.key === 'pending'
+          const showBadge = isPending && pendingCount > 0
+          return (
+            <button
+              key={isPending ? `pending-${pulseKey}` : t.key}
+              className={showBadge ? 'jcso-pulse' : ''}
+              style={btnTab(tab === t.key)}
+              onClick={() => handleTabClick(t.key)}
+            >
+              {showBadge ? (
+                <>
+                  Pending Requests{' '}
+                  <span style={{
+                    background: '#ef4444', color: '#fff',
+                    borderRadius: 10, padding: '1px 7px',
+                    fontSize: 11, fontWeight: 700, marginLeft: 2,
+                  }}>{pendingCount}</span>
+                </>
+              ) : t.label}
+            </button>
+          )
+        })}
       </div>
 
       {tab === 'dashboard' && <Dashboard />}
       {tab === 'weekly' && <WeeklyDetailView detectives={detectives} />}
-      {tab === 'pending' && <PendingRequestsView user={user} requireSignature={requireSignature} />}
+      {tab === 'pending' && <PendingRequestsView user={user} requireSignature={requireSignature} onCountRefresh={refreshCount} />}
       {tab === 'timeslips' && <TimeSlipsView user={user} requireSignature={requireSignature} />}
       {tab === 'payroll' && <PayrollView detectives={detectives} />}
       {tab === 'pdf_merger' && <PdfMergerView />}
