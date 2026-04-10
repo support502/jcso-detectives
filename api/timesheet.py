@@ -86,10 +86,17 @@ def _fill_detective_block(ws, rg_row, code_rows_list, ts_rows, detective_name):
     SUM / =B formulas in the template and are left untouched so Excel
     recalculates them on open.  The TOTAL row is also formula-driven.
     """
-    last_name = detective_name.split()[-1]
+    from openpyxl.styles import Font
 
-    # Name in col A of RG row
-    ws.cell(rg_row, 1).value = last_name
+    # Name in col A of RG row — full name, bold
+    name_cell = ws.cell(rg_row, 1)
+    name_cell.value = detective_name
+    existing = name_cell.font
+    name_cell.font = Font(
+        name=existing.name,
+        size=existing.size,
+        bold=True,
+    )
 
     # Fill RG hours (cols C-P)
     for i, tr in enumerate(ts_rows):
