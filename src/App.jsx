@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import JSZip from 'jszip'
+import { PDFDocument } from 'pdf-lib'
 import {
   supabase, getWeekStart, getWeekDates, formatDate, formatDateLong,
   todayStr, fetchUsers, loginUser, fetchEntry, upsertEntry,
@@ -1709,6 +1710,246 @@ function PayrollView({ detectives }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   11b. PDF MERGER VIEW — client-side PDF merge tool (supervisor only)
+   ═══════════════════════════════════════════════════════════════════ */
+
+const MAX_FILE_BYTES = 50 * 1024 * 1024 // 50 MB
+
+function PdfMergerView() {
+  const [files, setFiles] = useState([]) // [{ id, file, name, size, pages, error }]
+  const [merging, setMerging] = useState(false)
+  const [mergeError, setMergeError] = useState('')
+  const [doneMsg, setDoneMsg] = useState('')
+  const doneTimerRef = useRef(null)
+  const dragOverIdRef = useRef(null) // id of item being dragged over
+  const dragItemIdRef = useRef(null) // id of item being dragged
+
+  // Count pages in a PDF file
+  async function readPdf(file) {
+    try {
+      const buf = await file.arrayBuffer()
+      const doc = await PDFDocument.load(buf, { ignoreEncryption: false })
+      return { pages: doc.getPageCount(), error: null }
+    } catch (e) {
+      const msg = e.message || ''
+      if (msg.toLowerCase().includes('encrypt') || msg.toLowerCase().includes('password')) {
+        return { pages: null, error: 'Password-protected PDF — cannot merge.' }
+      }
+      return { pages: null, error: 'Could not read PDF — file may be corrupted.' }
+    }
+  }
+
+  async function addFiles(fileList) {
+    const incoming = []
+    for (const f of fileList) {
+      const ext = f.name.split('.').pop().toLowerCase()
+      const mime = f.type
+      if (ext !== 'pdf' && mime !== 'application/pdf') {
+        incoming.push({ id: crypto.randomUUID(), file: null, name: f.name, size: f.size, pages: null, error: 'Not a PDF file — skipped.' })
+        continue
+      }
+      if (f.size > MAX_FILE_BYTES) {
+        incoming.push({ id: crypto.randomUUID(), file: null, name: f.name, size: f.size, pages: null, error: `File exceeds 50 MB limit (${(f.size / 1024 / 1024).toFixed(1)} MB).` })
+        continue
+      }
+      const { pages, error } = await readPdf(f)
+      incoming.push({ id: crypto.randomUUID(), file: f, name: f.name, size: f.size, pages, error })
+    }
+    setFiles(prev => [...prev, ...incoming])
+  }
+
+  function handleDrop(e) {
+    e.preventDefault()
+    const dt = e.dataTransfer
+    if (dt.files && dt.files.length > 0) addFiles(dt.files)
+  }
+
+  function handlePickerChange(e) {
+    if (e.target.files && e.target.files.length > 0) {
+      addFiles(e.target.files)
+      e.target.value = '' // reset so same file can be re-added after removal
+    }
+  }
+
+  function removeFile(id) {
+    setFiles(prev => prev.filter(f => f.id !== id))
+  }
+
+  // List drag-to-reorder handlers
+  function onDragStart(id) { dragItemIdRef.current = id }
+  function onDragEnter(id) { dragOverIdRef.current = id }
+  function onDragEnd() {
+    const fromId = dragItemIdRef.current
+    const toId = dragOverIdRef.current
+    if (!fromId || !toId || fromId === toId) return
+    setFiles(prev => {
+      const arr = [...prev]
+      const fromIdx = arr.findIndex(f => f.id === fromId)
+      const toIdx = arr.findIndex(f => f.id === toId)
+      if (fromIdx === -1 || toIdx === -1) return prev
+      const [item] = arr.splice(fromIdx, 1)
+      arr.splice(toIdx, 0, item)
+      return arr
+    })
+    dragItemIdRef.current = null
+    dragOverIdRef.current = null
+  }
+
+  async function handleMerge() {
+    const valid = files.filter(f => f.file && !f.error)
+    if (valid.length < 2) return
+    setMerging(true)
+    setMergeError('')
+    setDoneMsg('')
+    try {
+      const merged = await PDFDocument.create()
+      for (const item of valid) {
+        const buf = await item.file.arrayBuffer()
+        const src = await PDFDocument.load(buf)
+        const pages = await merged.copyPages(src, src.getPageIndices())
+        pages.forEach(p => merged.addPage(p))
+      }
+      const bytes = await merged.save()
+      const blob = new Blob([bytes], { type: 'application/pdf' })
+      const url = URL.createObjectURL(blob)
+      const now = new Date()
+      const pad = n => String(n).padStart(2, '0')
+      const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `Merged_${ts}.pdf`
+      a.click()
+      URL.revokeObjectURL(url)
+      if (doneTimerRef.current) clearTimeout(doneTimerRef.current)
+      setDoneMsg('Merged successfully!')
+      doneTimerRef.current = setTimeout(() => setDoneMsg(''), 4000)
+    } catch (e) {
+      setMergeError('Merge failed: ' + (e.message || 'Unknown error'))
+    } finally {
+      setMerging(false)
+    }
+  }
+
+  function formatSize(bytes) {
+    if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+    return (bytes / 1024).toFixed(0) + ' KB'
+  }
+
+  const validCount = files.filter(f => f.file && !f.error).length
+  const fileInputRef = useRef(null)
+
+  return (
+    <div style={{ maxWidth: 680 }}>
+      {/* Drop zone */}
+      <div
+        onDrop={handleDrop}
+        onDragOver={e => e.preventDefault()}
+        onClick={() => fileInputRef.current?.click()}
+        style={{
+          border: `2px dashed ${s.gray300}`,
+          borderRadius: s.radius,
+          background: s.white,
+          padding: '40px 24px',
+          textAlign: 'center',
+          cursor: 'pointer',
+          marginBottom: 16,
+          transition: 'border-color 0.15s',
+        }}
+      >
+        <div style={{ fontSize: 32, marginBottom: 8 }}>📄</div>
+        <div style={{ fontWeight: 600, color: s.gray700, marginBottom: 4 }}>Drop PDF files here</div>
+        <div style={{ fontSize: 13, color: s.gray500 }}>or click to browse — multi-select supported, max 50 MB per file</div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,application/pdf"
+          multiple
+          style={{ display: 'none' }}
+          onChange={handlePickerChange}
+        />
+      </div>
+
+      {/* File list */}
+      {files.length > 0 && (
+        <div style={{ ...card, padding: 0, overflow: 'hidden', marginBottom: 16 }}>
+          {files.map((item, idx) => (
+            <div
+              key={item.id}
+              draggable
+              onDragStart={() => onDragStart(item.id)}
+              onDragEnter={() => onDragEnter(item.id)}
+              onDragEnd={onDragEnd}
+              onDragOver={e => e.preventDefault()}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                padding: '10px 16px',
+                borderBottom: idx < files.length - 1 ? `1px solid ${s.gray100}` : 'none',
+                background: s.white,
+                gap: 12,
+              }}
+            >
+              {/* Drag handle */}
+              <span style={{ cursor: 'grab', color: s.gray300, fontSize: 18, lineHeight: 1, userSelect: 'none' }}>⠿</span>
+
+              {/* File info */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, color: s.gray900, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {item.name}
+                </div>
+                {item.error ? (
+                  <div style={{ fontSize: 12, color: s.red }}>{item.error}</div>
+                ) : (
+                  <div style={{ fontSize: 12, color: s.gray500 }}>
+                    {item.pages} {item.pages === 1 ? 'page' : 'pages'} · {formatSize(item.size)}
+                  </div>
+                )}
+              </div>
+
+              {/* Remove */}
+              <button
+                onClick={() => removeFile(item.id)}
+                style={{ ...btnSecondary, padding: '4px 10px', fontSize: 13, lineHeight: 1 }}
+                title="Remove"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Actions */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button
+          onClick={handleMerge}
+          disabled={validCount < 2 || merging}
+          style={{ ...btnPrimary, opacity: (validCount < 2 || merging) ? 0.5 : 1, cursor: validCount < 2 || merging ? 'not-allowed' : 'pointer' }}
+        >
+          {merging ? 'Merging…' : `Merge & Download (${validCount} files)`}
+        </button>
+
+        {files.length > 0 && (
+          <button onClick={() => setFiles([])} style={btnSecondary}>
+            Clear All
+          </button>
+        )}
+
+        {doneMsg && (
+          <span style={{ fontSize: 14, color: s.green, fontWeight: 600 }}>{doneMsg}</span>
+        )}
+      </div>
+
+      {mergeError && (
+        <div style={{ marginTop: 12, padding: '10px 14px', background: '#fef2f2', border: `1px solid #fecaca`, borderRadius: s.radius, color: s.red, fontSize: 13 }}>
+          {mergeError}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    12. SUPERVISOR VIEW — wraps all supervisor tabs
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -1719,11 +1960,12 @@ function SupervisorView({ detectives, user }) {
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'weekly', label: 'Weekly View' },
     ...(user.can_access_payroll ? [{ key: 'payroll', label: 'Payroll' }] : []),
+    ...(user.can_access_payroll ? [{ key: 'pdf_merger', label: 'PDF Merger' }] : []),
   ]
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
         {tabs.map(t => (
           <button key={t.key} style={btnTab(tab === t.key)} onClick={() => setTab(t.key)}>
             {t.label}
@@ -1734,6 +1976,7 @@ function SupervisorView({ detectives, user }) {
       {tab === 'dashboard' && <Dashboard />}
       {tab === 'weekly' && <WeeklyDetailView detectives={detectives} />}
       {tab === 'payroll' && <PayrollView detectives={detectives} />}
+      {tab === 'pdf_merger' && <PdfMergerView />}
     </div>
   )
 }
