@@ -13,6 +13,7 @@ import {
   fetchPendingRequests, fetchPendingCount,
   approveTimeOffRequest, approveOvertimeRequest,
   denyTimeOffRequest, denyOvertimeRequest,
+  fetchOtherLeaveForPeriod,
 } from './supabase'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1255,7 +1256,7 @@ function PendingRequestsView({ user, requireSignature, onCountRefresh }) {
 
   async function handleDelete(row) {
     const msg = row.status !== 'pending'
-      ? `This request has already been ${row.status}. Deleting will permanently remove it from the system. If it was approved, any related payroll entries will need to be reverted manually. Continue?`
+      ? `This request has already been ${row.status}. Deleting will remove it and automatically roll back any related payroll entries. Continue?`
       : 'Permanently delete this request?'
     if (!confirm(msg)) return
     try {
@@ -2201,14 +2202,26 @@ function normalizeTimesheetGrid(rows) {
     }
   }
   return rows.map(r => {
+    // Build per-code map preserving hours and source_request_id
     const codeMap = {}
     for (const cr of (r.code_rows || [])) {
-      if (cr.code) codeMap[cr.code] = Number(cr.hours) || 0
+      if (cr.code) {
+        if (!codeMap[cr.code]) {
+          codeMap[cr.code] = { hours: 0, source_request_id: null }
+        }
+        codeMap[cr.code].hours += Number(cr.hours) || 0
+        if (cr.source_request_id) codeMap[cr.code].source_request_id = cr.source_request_id
+      }
     }
     const normalizedCodes = []
     for (let i = 0; i < NUM_CODE_ROWS; i++) {
       const code = allCodes[i] || ''
-      normalizedCodes.push({ code, hours: code ? (codeMap[code] || 0) : 0 })
+      const entry = codeMap[code]
+      normalizedCodes.push({
+        code,
+        hours: entry ? entry.hours : 0,
+        source_request_id: entry?.source_request_id || null,
+      })
     }
     return {
       ...r,
@@ -2220,6 +2233,7 @@ function normalizeTimesheetGrid(rows) {
 
 function PayrollView({ detectives }) {
   const [selectedPeriod, setSelectedPeriod] = useState(findCurrentPayPeriod)
+  const [otherLeave, setOtherLeave] = useState([])
 
   const dets = useMemo(() => {
     return [...detectives].sort((a, b) => a.name.split(' ').pop().localeCompare(b.name.split(' ').pop()))
@@ -2265,6 +2279,16 @@ function PayrollView({ detectives }) {
       .catch(err => alert('Failed to load timesheet: ' + err.message))
       .finally(() => setLoading(false))
   }, [selectedDetId, selectedPeriod])
+
+  // Fetch approved "other" leave for the selected pay period (banner)
+  useEffect(() => {
+    if (!selectedPeriod) return
+    const pp = PAY_PERIODS.find(p => p.start === selectedPeriod)
+    if (!pp) return
+    fetchOtherLeaveForPeriod(pp.start, pp.end)
+      .then(setOtherLeave)
+      .catch(() => setOtherLeave([]))
+  }, [selectedPeriod])
 
   function updateCell(dayIndex, field, value, codeRowIndex) {
     setGridData(prev => {
@@ -2558,6 +2582,43 @@ function PayrollView({ detectives }) {
           </div>
         </>
       ) : null}
+
+      {/* Other Leave banner — approved type='other' requests needing manual coding */}
+      {otherLeave.length > 0 && (() => {
+        const detMap = {}
+        for (const d of detectives) detMap[d.id] = d.name
+        const pp = PAY_PERIODS.find(p => p.start === selectedPeriod)
+        return (
+          <div style={{
+            ...card,
+            background: s.amberLight,
+            border: `1px solid ${s.amber}`,
+            padding: '14px 18px',
+            marginTop: 12,
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#92400e', marginBottom: 8 }}>
+              ⚠️ Other leave this period needs manual coding:
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, color: '#78350f' }}>
+              {otherLeave.map(r => {
+                const name = detMap[r.user_id] || 'Unknown'
+                const datesInPeriod = (r.dates_picked || []).filter(
+                  d => pp && d >= pp.start && d <= pp.end
+                )
+                const dateStr = datesInPeriod.map(d => {
+                  const dt = new Date(d + 'T00:00:00')
+                  return `${dt.getMonth() + 1}/${dt.getDate()}`
+                }).join(', ')
+                return (
+                  <li key={r.id} style={{ marginBottom: 4 }}>
+                    {name} — {r.hours} hrs on {dateStr} — '{r.other_code || 'Other'}'
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        )
+      })()}
     </div>
   )
 }

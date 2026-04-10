@@ -200,12 +200,9 @@ def _pull_from_entries(user_id, pp_start):
         stats = entry_map.get(day_str)
         total_hours = _safe_hours(stats)
 
-        reg = min(total_hours, 8.0)
-        ot = max(total_hours - 8.0, 0.0)
+        reg = total_hours
 
         code_rows = []
-        if ot > 0:
-            code_rows.append({'code': 'OT', 'hours': ot})
         if day in holidays:
             code_rows.append({'code': 'HL', 'hours': 8.0})
 
