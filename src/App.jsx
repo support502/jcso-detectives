@@ -5,6 +5,7 @@ import {
   supabase, getWeekStart, getWeekDates, formatDate, formatDateLong,
   todayStr, fetchUsers, loginUser, fetchEntry, upsertEntry,
   fetchUserEntries, fetchAllEntries, fetchMonthEntries, fetchEntriesRange,
+  updateUserSignature,
 } from './supabase'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1982,12 +1983,202 @@ function SupervisorView({ detectives, user }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   13. SIGNATURE MODAL — draw / view stored signature
+   Storage format: full data URL ("data:image/png;base64,...")
+   so it can be dropped directly into <img src> or a PDF embed.
+   ═══════════════════════════════════════════════════════════════════ */
+
+function SignatureModal({ mode, required, signaturePng, onSave, onClose, onRedraw }) {
+  const canvasRef = useRef(null)
+  const isDrawingRef = useRef(false)
+  const lastPosRef = useRef(null)
+  const [drawError, setDrawError] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  // Fill canvas white whenever we enter draw mode
+  useEffect(() => {
+    if (mode !== 'draw') return
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+  }, [mode])
+
+  function getPos(e) {
+    const canvas = canvasRef.current
+    const rect = canvas.getBoundingClientRect()
+    const scaleX = canvas.width / rect.width
+    const scaleY = canvas.height / rect.height
+    if (e.touches && e.touches.length > 0) {
+      return {
+        x: (e.touches[0].clientX - rect.left) * scaleX,
+        y: (e.touches[0].clientY - rect.top) * scaleY,
+      }
+    }
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY,
+    }
+  }
+
+  function startDraw(e) {
+    e.preventDefault()
+    isDrawingRef.current = true
+    lastPosRef.current = getPos(e)
+    setDrawError('')
+  }
+
+  function draw(e) {
+    e.preventDefault()
+    if (!isDrawingRef.current) return
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext('2d')
+    const pos = getPos(e)
+    ctx.beginPath()
+    ctx.moveTo(lastPosRef.current.x, lastPosRef.current.y)
+    ctx.lineTo(pos.x, pos.y)
+    ctx.strokeStyle = '#1a1a1a'
+    ctx.lineWidth = 2.5
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.stroke()
+    lastPosRef.current = pos
+  }
+
+  function endDraw(e) {
+    e?.preventDefault()
+    isDrawingRef.current = false
+    lastPosRef.current = null
+  }
+
+  function clearCanvas() {
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    setDrawError('')
+  }
+
+  function isCanvasBlank() {
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext('2d')
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] < 255 || data[i + 1] < 255 || data[i + 2] < 255) return false
+    }
+    return true
+  }
+
+  async function handleSave() {
+    if (isCanvasBlank()) {
+      setDrawError('Please draw a signature before saving.')
+      return
+    }
+    setSaving(true)
+    try {
+      const dataUrl = canvasRef.current.toDataURL('image/png')
+      await onSave(dataUrl)
+    } catch (e) {
+      setDrawError('Failed to save: ' + (e.message || 'Unknown error'))
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 1000, padding: 16,
+    }}>
+      <div style={{
+        background: s.white, borderRadius: s.radius * 1.5,
+        boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+        width: '100%', maxWidth: 560, padding: 28, fontFamily: s.font,
+      }}>
+        <h2 style={{ margin: '0 0 6px', fontSize: 20, color: s.navy }}>
+          {mode === 'view' ? 'My Signature' : 'Draw Your Signature'}
+        </h2>
+        <p style={{ margin: '0 0 20px', fontSize: 13, color: s.gray500, lineHeight: 1.5 }}>
+          {mode === 'view'
+            ? 'Your saved signature. Click "Redraw" to replace it.'
+            : 'Use your mouse, finger, or stylus to sign below. This will be used on your time-off and overtime request forms.'}
+          {mode === 'draw' && required && (
+            <><br /><span style={{ color: s.red }}>You need to set up your signature before continuing.</span></>
+          )}
+        </p>
+
+        {mode === 'view' ? (
+          <div style={{
+            border: `1px solid ${s.gray200}`, borderRadius: s.radius,
+            background: s.gray100, padding: 16, marginBottom: 20, textAlign: 'center',
+          }}>
+            <img
+              src={signaturePng}
+              alt="Your signature"
+              style={{ maxWidth: '100%', maxHeight: 160, objectFit: 'contain' }}
+            />
+          </div>
+        ) : (
+          <>
+            <div style={{ border: `1px solid ${s.gray300}`, borderRadius: s.radius, overflow: 'hidden', marginBottom: 8 }}>
+              <canvas
+                ref={canvasRef}
+                width={500}
+                height={200}
+                style={{ display: 'block', width: '100%', height: 'auto', touchAction: 'none', cursor: 'crosshair' }}
+                onMouseDown={startDraw}
+                onMouseMove={draw}
+                onMouseUp={endDraw}
+                onMouseLeave={endDraw}
+                onTouchStart={startDraw}
+                onTouchMove={draw}
+                onTouchEnd={endDraw}
+              />
+            </div>
+            {drawError && (
+              <p style={{ margin: '0 0 8px', fontSize: 13, color: s.red }}>{drawError}</p>
+            )}
+            <div style={{ marginBottom: 20 }}>
+              <button onClick={clearCanvas} style={btnSecondary}>Clear</button>
+            </div>
+          </>
+        )}
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          {mode === 'view' ? (
+            <>
+              <button onClick={onRedraw} style={btnSecondary}>Redraw</button>
+              <button onClick={onClose} style={btnPrimary}>Done</button>
+            </>
+          ) : (
+            <>
+              {!required && <button onClick={onClose} style={btnSecondary}>Cancel</button>}
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                style={{ ...btnPrimary, opacity: saving ? 0.6 : 1, cursor: saving ? 'not-allowed' : 'pointer' }}
+              >
+                {saving ? 'Saving…' : 'Save Signature'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    12. APP — main component with auth and routing
    ═══════════════════════════════════════════════════════════════════ */
 
 export default function App() {
   const [user, setUser] = useState(null)
   const [allUsers, setAllUsers] = useState([])
+
+  // sigModal: null | { mode: 'view'|'draw', required: bool, resolve: fn|null, reject: fn|null }
+  const [sigModal, setSigModal] = useState(null)
 
   // Restore session from localStorage, then re-fetch the user row from DB
   // to pick up any new columns (e.g. can_access_payroll) added after the session was cached.
@@ -2022,6 +2213,42 @@ export default function App() {
     localStorage.removeItem('jcso_det_user')
   }
 
+  // Save signature to DB + update in-memory state + localStorage
+  async function handleSaveSignature(dataUrl) {
+    const updated = await updateUserSignature(user.id, dataUrl)
+    setUser(updated)
+    localStorage.setItem('jcso_det_user', JSON.stringify(updated))
+    const resolve = sigModal?.resolve
+    setSigModal(null)
+    if (resolve) resolve(true)
+  }
+
+  function closeSigModal() {
+    const reject = sigModal?.reject
+    setSigModal(null)
+    if (reject) reject(new Error('cancelled'))
+  }
+
+  // Opens SignatureModal if user has no signature, otherwise resolves immediately.
+  // Returns a Promise — call before any action that requires a signature.
+  // Not wired into any action yet (Phase 5b).
+  function requireSignature() {
+    if (user?.signature_png) return Promise.resolve(true)
+    return new Promise((resolve, reject) => {
+      setSigModal({ mode: 'draw', required: true, resolve, reject })
+    })
+  }
+  // Suppress unused-variable lint for requireSignature until Phase 5b wires it in.
+  void requireSignature
+
+  function openSigModal() {
+    if (user?.signature_png) {
+      setSigModal({ mode: 'view', required: false, resolve: null, reject: null })
+    } else {
+      setSigModal({ mode: 'draw', required: false, resolve: null, reject: null })
+    }
+  }
+
   if (!user) return <LoginScreen onLogin={handleLogin} />
 
   const isSupervisor = user.role === 'supervisor'
@@ -2043,8 +2270,15 @@ export default function App() {
             {isSupervisor ? 'Supervisor' : user.unit}
           </span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 14, opacity: 0.8 }}>{user.name}</span>
+          <button
+            onClick={openSigModal}
+            style={{ ...btn, background: 'rgba(255,255,255,0.1)', color: s.white, padding: '6px 14px', fontSize: 13 }}
+            title={user.signature_png ? 'View / redraw your signature' : 'Set up your signature'}
+          >
+            {user.signature_png ? '✓ Signature' : 'My Signature'}
+          </button>
           <button onClick={handleLogout} style={{ ...btn, background: 'rgba(255,255,255,0.1)', color: s.white, padding: '6px 14px', fontSize: 13 }}>
             Sign Out
           </button>
@@ -2058,6 +2292,18 @@ export default function App() {
           : <DetectiveView user={user} />
         }
       </main>
+
+      {/* Signature modal */}
+      {sigModal && (
+        <SignatureModal
+          mode={sigModal.mode}
+          required={sigModal.required}
+          signaturePng={user.signature_png || null}
+          onSave={handleSaveSignature}
+          onClose={closeSigModal}
+          onRedraw={() => setSigModal(prev => ({ ...prev, mode: 'draw' }))}
+        />
+      )}
     </div>
   )
 }

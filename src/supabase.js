@@ -133,6 +133,18 @@ export async function fetchAllEntries(filters = {}) {
   return data
 }
 
+// Update the signature PNG (full data URL) for a user
+export async function updateUserSignature(userId, signaturePng) {
+  const { data, error } = await supabase
+    .from('det_users')
+    .update({ signature_png: signaturePng })
+    .eq('id', userId)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
 // Fetch entries for a specific month/year, or all months in a year if month is null
 export async function fetchMonthEntries(month, year) {
   let query = supabase
