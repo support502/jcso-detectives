@@ -133,6 +133,92 @@ export async function fetchAllEntries(filters = {}) {
   return data
 }
 
+/* ─── Time Off Requests ─── */
+
+export async function fetchTimeOffRequestsForUser(userId) {
+  const { data, error } = await supabase
+    .from('time_off_requests')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('deleted', false)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return data
+}
+
+export async function createTimeOffRequest(payload) {
+  const { data, error } = await supabase
+    .from('time_off_requests')
+    .insert(payload)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
+export async function updateTimeOffRequest(id, payload) {
+  const { data, error } = await supabase
+    .from('time_off_requests')
+    .update({ ...payload, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
+export async function deleteTimeOffRequest(id) {
+  const { error } = await supabase
+    .from('time_off_requests')
+    .update({ deleted: true, updated_at: new Date().toISOString() })
+    .eq('id', id)
+  if (error) throw error
+}
+
+/* ─── Overtime Requests ─── */
+
+export async function fetchOvertimeRequestsForUser(userId) {
+  const { data, error } = await supabase
+    .from('overtime_requests')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('deleted', false)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return data
+}
+
+export async function createOvertimeRequest(payload) {
+  const { data, error } = await supabase
+    .from('overtime_requests')
+    .insert(payload)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
+export async function updateOvertimeRequest(id, payload) {
+  const { data, error } = await supabase
+    .from('overtime_requests')
+    .update({ ...payload, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select()
+    .single()
+  if (error) throw error
+  return data
+}
+
+export async function deleteOvertimeRequest(id) {
+  const { error } = await supabase
+    .from('overtime_requests')
+    .update({ deleted: true, updated_at: new Date().toISOString() })
+    .eq('id', id)
+  if (error) throw error
+}
+
+/* ─── Signature ─── */
+
 // Update the signature PNG (full data URL) for a user
 export async function updateUserSignature(userId, signaturePng) {
   const { data, error } = await supabase

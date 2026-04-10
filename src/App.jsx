@@ -1,11 +1,15 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
+import { DayPicker } from 'react-day-picker'
+import 'react-day-picker/style.css'
 import {
   supabase, getWeekStart, getWeekDates, formatDate, formatDateLong,
   todayStr, fetchUsers, loginUser, fetchEntry, upsertEntry,
   fetchUserEntries, fetchAllEntries, fetchMonthEntries, fetchEntriesRange,
   updateUserSignature,
+  fetchTimeOffRequestsForUser, createTimeOffRequest, updateTimeOffRequest, deleteTimeOffRequest,
+  fetchOvertimeRequestsForUser, createOvertimeRequest, updateOvertimeRequest, deleteOvertimeRequest,
 } from './supabase'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -684,6 +688,468 @@ function HistoryView({ user }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   6b. TIME SLIPS — detective request submission (time off + overtime)
+   ═══════════════════════════════════════════════════════════════════ */
+
+const TIME_OFF_TYPES = ['Vacation', 'Comp Time', 'Sick Time', 'Personal Time', 'Other']
+
+// Convert a local Date to YYYY-MM-DD without timezone shift
+function toLocalDateStr(d) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function fmtShortDate(str) {
+  if (!str) return ''
+  return new Date(str + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function fmtDateTime(isoStr) {
+  if (!isoStr) return ''
+  return new Date(isoStr).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+const STATUS_BADGE = {
+  pending:  { background: '#fef3c7', color: '#92400e' },
+  approved: { background: '#dcfce7', color: '#166534' },
+  denied:   { background: '#fee2e2', color: '#991b1b' },
+}
+
+// Scrollable overlay wrapper shared by both form modals
+function ModalWrap({ children }) {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+      overflowY: 'auto', zIndex: 1000,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'center', padding: '24px 16px', minHeight: '100%' }}>
+        <div style={{
+          background: s.white, borderRadius: s.radius * 1.5,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          width: '100%', maxWidth: 540, padding: 28,
+          fontFamily: s.font, height: 'fit-content',
+        }}>
+          {children}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TimeOffForm({ user, onClose, onSaved, requireSignature, editRow }) {
+  const [requestDate, setRequestDate] = useState(editRow?.request_date || todayStr())
+  const [type, setType] = useState(editRow?.type || '')
+  const [otherCode, setOtherCode] = useState(editRow?.other_code || '')
+  const [hours, setHours] = useState(editRow?.hours != null ? String(editRow.hours) : '')
+  const [selectedDays, setSelectedDays] = useState(
+    editRow?.dates_picked?.length
+      ? editRow.dates_picked.map(str => new Date(str + 'T00:00:00'))
+      : []
+  )
+  const [datesNotes, setDatesNotes] = useState(editRow?.dates_notes || '')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  async function handleSubmit() {
+    setError('')
+    if (!type) { setError('Please select a time off type.'); return }
+    if (!hours || Number(hours) <= 0) { setError('Please enter a positive number of hours.'); return }
+    if (selectedDays.length === 0) { setError('Please select at least one date.'); return }
+    if (type === 'Other' && !otherCode.trim()) { setError('Please describe the reason for "Other".'); return }
+    try { await requireSignature() } catch { return }
+    setSubmitting(true)
+    try {
+      const payload = {
+        user_id: user.id,
+        user_name: user.name,
+        unit: user.unit,
+        request_date: requestDate,
+        type,
+        other_code: type === 'Other' ? otherCode.trim() : null,
+        hours: Number(hours),
+        dates_picked: [...selectedDays].sort((a, b) => a - b).map(toLocalDateStr),
+        dates_notes: datesNotes.trim() || null,
+        status: 'pending',
+        person_signed_at: new Date().toISOString(),
+      }
+      if (editRow) {
+        await updateTimeOffRequest(editRow.id, payload)
+      } else {
+        await createTimeOffRequest(payload)
+      }
+      onSaved()
+    } catch (e) {
+      setError('Failed to submit: ' + (e.message || 'Unknown error'))
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <ModalWrap>
+      <h2 style={{ margin: '0 0 6px', fontSize: 20, color: s.navy }}>
+        {editRow ? 'Edit Time Off Request' : 'Request Time Off'}
+      </h2>
+      <p style={{ margin: '0 0 20px', fontSize: 13, color: s.gray500 }}>
+        Fields marked * are required.
+      </p>
+
+      <div style={{ marginBottom: 16 }}>
+        <label style={label}>Date of Request</label>
+        <input type="date" value={requestDate} onChange={e => setRequestDate(e.target.value)}
+          style={{ ...input, width: 'auto' }} />
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <label style={label}>Type *</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+          {TIME_OFF_TYPES.map(t => (
+            <label key={t} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14, color: s.gray700, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
+              <input type="radio" name="timeoff_type" value={t} checked={type === t} onChange={() => setType(t)} />
+              {t}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {type === 'Other' && (
+        <div style={{ marginBottom: 16 }}>
+          <label style={label}>Reason *</label>
+          <input type="text" value={otherCode} onChange={e => setOtherCode(e.target.value)}
+            placeholder="e.g., Bereavement - family funeral" style={input} />
+        </div>
+      )}
+
+      <div style={{ marginBottom: 16 }}>
+        <label style={label}>Number of Hours *</label>
+        <input type="number" min="0" step="0.5" value={hours} onChange={e => setHours(e.target.value)}
+          style={{ ...input, width: 120 }} placeholder="e.g., 8" />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <label style={label}>
+          Dates *{selectedDays.length > 0 && (
+            <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: s.navy, marginLeft: 6 }}>
+              ({selectedDays.length} selected)
+            </span>
+          )}
+        </label>
+        <div style={{ border: `1px solid ${s.gray200}`, borderRadius: s.radius, display: 'inline-block', padding: '4px 8px', marginTop: 4 }}>
+          <DayPicker mode="multiple" selected={selectedDays} onSelect={days => setSelectedDays(days || [])} />
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 20 }}>
+        <label style={{ ...label, textTransform: 'none', letterSpacing: 0, fontSize: 12, fontWeight: 600, color: s.gray500 }}>
+          Notes about Dates <span style={{ fontWeight: 400 }}>(optional)</span>
+        </label>
+        <input type="text" value={datesNotes} onChange={e => setDatesNotes(e.target.value)}
+          placeholder="e.g., morning only" style={input} />
+      </div>
+
+      {error && <p style={{ margin: '0 0 12px', fontSize: 13, color: s.red }}>{error}</p>}
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick={onClose} style={btnSecondary} disabled={submitting}>Cancel</button>
+        <button onClick={handleSubmit} disabled={submitting}
+          style={{ ...btnPrimary, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'not-allowed' : 'pointer' }}>
+          {submitting ? 'Submitting…' : 'Sign and Submit'}
+        </button>
+      </div>
+    </ModalWrap>
+  )
+}
+
+function OvertimeForm({ user, onClose, onSaved, requireSignature, editRow }) {
+  const [dateWorked, setDateWorked] = useState(editRow?.date_worked || todayStr())
+  const [timeWorked, setTimeWorked] = useState(editRow?.time_worked || '')
+  const [regularShift, setRegularShift] = useState(editRow?.regular_shift_time || '')
+  const [hoursWorked, setHoursWorked] = useState(editRow?.hours_worked != null ? String(editRow.hours_worked) : '')
+  const [caseNumbers, setCaseNumbers] = useState(editRow?.case_numbers || '')
+  const [purpose, setPurpose] = useState(editRow?.purpose || '')
+  const [request, setRequest] = useState(editRow?.request || '')
+  const [grade, setGrade] = useState(editRow?.grade || '')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  async function handleSubmit() {
+    setError('')
+    if (!dateWorked) { setError('Date worked is required.'); return }
+    if (!hoursWorked || Number(hoursWorked) <= 0) { setError('Please enter a positive number of hours worked.'); return }
+    try { await requireSignature() } catch { return }
+    setSubmitting(true)
+    try {
+      const payload = {
+        user_id: user.id,
+        user_name: user.name,
+        unit: user.unit,
+        date_worked: dateWorked,
+        time_worked: timeWorked.trim() || null,
+        regular_shift_time: regularShift.trim() || null,
+        hours_worked: Number(hoursWorked),
+        case_numbers: caseNumbers.trim() || null,
+        purpose: purpose.trim() || null,
+        request: request || null,
+        grade: grade.trim() || null,
+        status: 'pending',
+        person_signed_at: new Date().toISOString(),
+      }
+      if (editRow) {
+        await updateOvertimeRequest(editRow.id, payload)
+      } else {
+        await createOvertimeRequest(payload)
+      }
+      onSaved()
+    } catch (e) {
+      setError('Failed to submit: ' + (e.message || 'Unknown error'))
+      setSubmitting(false)
+    }
+  }
+
+  const row = { marginBottom: 16 }
+
+  return (
+    <ModalWrap>
+      <h2 style={{ margin: '0 0 6px', fontSize: 20, color: s.navy }}>
+        {editRow ? 'Edit Overtime Request' : 'Submit Overtime'}
+      </h2>
+      <p style={{ margin: '0 0 20px', fontSize: 13, color: s.gray500 }}>
+        Fields marked * are required.
+      </p>
+
+      <div style={row}>
+        <label style={label}>Date Worked *</label>
+        <input type="date" value={dateWorked} onChange={e => setDateWorked(e.target.value)}
+          style={{ ...input, width: 'auto' }} />
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <div>
+          <label style={label}>Time Worked</label>
+          <input type="text" value={timeWorked} onChange={e => setTimeWorked(e.target.value)}
+            placeholder="e.g., 1800-0200" style={input} />
+        </div>
+        <div>
+          <label style={label}>Regular Shift</label>
+          <input type="text" value={regularShift} onChange={e => setRegularShift(e.target.value)}
+            placeholder="e.g., 0800-1600" style={input} />
+        </div>
+      </div>
+
+      <div style={row}>
+        <label style={label}>Hours Worked *</label>
+        <input type="number" min="0" step="0.5" value={hoursWorked} onChange={e => setHoursWorked(e.target.value)}
+          style={{ ...input, width: 120 }} placeholder="e.g., 4" />
+      </div>
+
+      <div style={row}>
+        <label style={label}>Case Number(s)</label>
+        <input type="text" value={caseNumbers} onChange={e => setCaseNumbers(e.target.value)}
+          placeholder="e.g., 25-1234" style={input} />
+      </div>
+
+      <div style={row}>
+        <label style={label}>Purpose of Overtime</label>
+        <textarea value={purpose} onChange={e => setPurpose(e.target.value)}
+          placeholder="Describe the reason for this overtime…"
+          style={{ ...input, height: 80, resize: 'vertical' }} />
+      </div>
+
+      <div style={row}>
+        <label style={label}>Request</label>
+        <div style={{ display: 'flex', gap: 24, marginTop: 4 }}>
+          {['Payment', 'Comp Time'].map(opt => (
+            <label key={opt} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14, color: s.gray700, fontWeight: 400 }}>
+              <input type="radio" name="ot_request" value={opt} checked={request === opt} onChange={() => setRequest(opt)} />
+              {opt}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 20 }}>
+        <label style={label}>Grade</label>
+        <input type="text" value={grade} onChange={e => setGrade(e.target.value)}
+          placeholder="e.g., LE3" style={{ ...input, width: 120 }} />
+      </div>
+
+      {error && <p style={{ margin: '0 0 12px', fontSize: 13, color: s.red }}>{error}</p>}
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick={onClose} style={btnSecondary} disabled={submitting}>Cancel</button>
+        <button onClick={handleSubmit} disabled={submitting}
+          style={{ ...btnPrimary, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'not-allowed' : 'pointer' }}>
+          {submitting ? 'Submitting…' : 'Sign and Submit'}
+        </button>
+      </div>
+    </ModalWrap>
+  )
+}
+
+function TimeSlipsView({ user, requireSignature }) {
+  const [requests, setRequests] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(null) // null | 'timeoff' | 'ot'
+  const [editRow, setEditRow] = useState(null)
+
+  useEffect(() => { loadRequests() }, [user.id])
+
+  async function loadRequests() {
+    setLoading(true)
+    try {
+      const [timeOff, ot] = await Promise.all([
+        fetchTimeOffRequestsForUser(user.id),
+        fetchOvertimeRequestsForUser(user.id),
+      ])
+      const combined = [
+        ...timeOff.map(r => ({ ...r, _type: 'timeoff' })),
+        ...ot.map(r => ({ ...r, _type: 'ot' })),
+      ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      setRequests(combined)
+    } catch { /* ignore */ }
+    setLoading(false)
+  }
+
+  function closeForm() { setShowForm(null); setEditRow(null) }
+
+  async function handleDelete(row) {
+    if (!confirm('Permanently delete this request?')) return
+    try {
+      if (row._type === 'timeoff') await deleteTimeOffRequest(row.id)
+      else await deleteOvertimeRequest(row.id)
+      loadRequests()
+    } catch { alert('Failed to delete request. Please try again.') }
+  }
+
+  function handleEdit(row) {
+    setEditRow(row)
+    setShowForm(row._type === 'timeoff' ? 'timeoff' : 'ot')
+  }
+
+  return (
+    <>
+      {/* Action buttons */}
+      <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
+        <button onClick={() => { setEditRow(null); setShowForm('timeoff') }} style={btnPrimary}>
+          Request Time Off
+        </button>
+        <button onClick={() => { setEditRow(null); setShowForm('ot') }}
+          style={{ ...btnPrimary, background: s.navy, color: s.white }}>
+          Submit Overtime
+        </button>
+      </div>
+
+      {/* List */}
+      {loading ? (
+        <div style={{ color: s.gray500, fontSize: 14, padding: 8 }}>Loading…</div>
+      ) : requests.length === 0 ? (
+        <div style={{ ...card, textAlign: 'center', color: s.gray500, padding: 40 }}>
+          No requests yet. Click a button above to submit your first one.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {requests.map(row => {
+            const isTO = row._type === 'timeoff'
+            const stStyle = STATUS_BADGE[row.status] || STATUS_BADGE.pending
+            return (
+              <div key={`${row._type}-${row.id}`} style={{ ...card, marginBottom: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                  {/* Type badge */}
+                  <span style={{
+                    background: isTO ? '#dbeafe' : '#ede9fe',
+                    color: isTO ? '#1e40af' : '#5b21b6',
+                    padding: '2px 8px', borderRadius: 4,
+                    fontSize: 11, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap',
+                  }}>
+                    {isTO ? 'Time Off' : 'Overtime'}
+                  </span>
+
+                  {/* Status badge */}
+                  <span style={{
+                    ...stStyle,
+                    padding: '2px 8px', borderRadius: 4,
+                    fontSize: 11, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap',
+                  }}>
+                    {row.status}
+                  </span>
+
+                  {/* Summary */}
+                  <div style={{ flex: 1, minWidth: 160 }}>
+                    {isTO ? (
+                      <div style={{ fontSize: 14, color: s.gray900 }}>
+                        <strong>{row.type}</strong>
+                        {row.type === 'Other' && row.other_code ? ` — ${row.other_code}` : ''}
+                        {' · '}
+                        <strong>{row.hours}</strong> {row.hours === 1 ? 'hr' : 'hrs'}
+                        {row.dates_picked?.length > 0
+                          ? ` · ${fmtShortDate(row.dates_picked[0])}${row.dates_picked.length > 1 ? ` +${row.dates_picked.length - 1}` : ''}`
+                          : ''}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 14, color: s.gray900 }}>
+                        <strong>{fmtShortDate(row.date_worked)}</strong>
+                        {' · '}
+                        <strong>{row.hours_worked}</strong> {row.hours_worked === 1 ? 'hr' : 'hrs'}
+                        {row.purpose
+                          ? <span style={{ color: s.gray500 }}> · {row.purpose.length > 50 ? row.purpose.slice(0, 50) + '…' : row.purpose}</span>
+                          : ''}
+                      </div>
+                    )}
+                    {row.status === 'denied' && row.deny_reason && (
+                      <div style={{ fontSize: 12, color: s.red, marginTop: 3 }}>
+                        Denied: {row.deny_reason}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11, color: s.gray500, marginTop: 3 }}>
+                      Submitted {fmtDateTime(row.created_at)}
+                    </div>
+                  </div>
+
+                  {/* Edit / Delete — pending rows only */}
+                  {row.status === 'pending' && (
+                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+                      <button onClick={() => handleEdit(row)}
+                        style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
+                        Edit
+                      </button>
+                      <button onClick={() => handleDelete(row)}
+                        style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13, color: s.red }}>
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Form modals */}
+      {showForm === 'timeoff' && (
+        <TimeOffForm
+          user={user}
+          requireSignature={requireSignature}
+          editRow={editRow}
+          onClose={closeForm}
+          onSaved={() => { closeForm(); loadRequests() }}
+        />
+      )}
+      {showForm === 'ot' && (
+        <OvertimeForm
+          user={user}
+          requireSignature={requireSignature}
+          editRow={editRow}
+          onClose={closeForm}
+          onSaved={() => { closeForm(); loadRequests() }}
+        />
+      )}
+    </>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    7. DETECTIVE VIEW — wraps entry form + history with tabs
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -697,7 +1163,7 @@ const btnTab = (active) => ({
   fontSize: 14,
 })
 
-function DetectiveView({ user }) {
+function DetectiveView({ user, requireSignature }) {
   const [tab, setTab] = useState('entry')
 
   return (
@@ -709,10 +1175,14 @@ function DetectiveView({ user }) {
         <button style={btnTab(tab === 'history')} onClick={() => setTab('history')}>
           History
         </button>
+        <button style={btnTab(tab === 'timeslips')} onClick={() => setTab('timeslips')}>
+          Time Slips
+        </button>
       </div>
 
       {tab === 'entry' && <EntryForm user={user} />}
       {tab === 'history' && <HistoryView user={user} />}
+      {tab === 'timeslips' && <TimeSlipsView user={user} requireSignature={requireSignature} />}
     </div>
   )
 }
@@ -2238,8 +2708,6 @@ export default function App() {
       setSigModal({ mode: 'draw', required: true, resolve, reject })
     })
   }
-  // Suppress unused-variable lint for requireSignature until Phase 5b wires it in.
-  void requireSignature
 
   function openSigModal() {
     if (user?.signature_png) {
@@ -2289,7 +2757,7 @@ export default function App() {
       <main style={{ maxWidth: 1200, margin: '0 auto', padding: 24 }}>
         {isSupervisor
           ? <SupervisorView detectives={allUsers} user={user} />
-          : <DetectiveView user={user} />
+          : <DetectiveView user={user} requireSignature={requireSignature} />
         }
       </main>
 
