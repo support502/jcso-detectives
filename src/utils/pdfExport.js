@@ -40,17 +40,20 @@ function downloadPdf(bytes, filename) {
 
 // Draw a signature PNG at a form field's widget rectangle, then remove the field.
 // Works for any field type (text, Adobe Sign signature, etc.).
+// Does NOT call removeField — Adobe Sign fields throw in removeField because they
+// have no appearance stream. The orphan field is invisible after flatten({ updateFieldAppearances: false }).
 async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase64) {
   const raw = toRawBase64(signatureBase64)
   if (!raw) return
+
+  const field = form.getFields().find(f => f.getName() === fieldName)
+  if (!field) { console.warn(`[pdfExport] field not found: ${fieldName}`); return }
+
+  const widgets = field.acroField.getWidgets()
+  if (widgets.length === 0) { console.warn(`[pdfExport] no widgets for: ${fieldName}`); return }
+  const rect = widgets[0].getRectangle()
+
   try {
-    const field = form.getFields().find(f => f.getName() === fieldName)
-    if (!field) { console.warn(`[pdfExport] field not found: ${fieldName}`); return }
-
-    const widgets = field.acroField.getWidgets()
-    if (widgets.length === 0) { console.warn(`[pdfExport] no widgets for: ${fieldName}`); return }
-    const rect = widgets[0].getRectangle()
-
     const pngBytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0))
     const pngImage = await pdfDoc.embedPng(pngBytes)
 
@@ -64,31 +67,27 @@ async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase
       width: drawWidth,
       height: drawHeight,
     })
-
-    form.removeField(field)
   } catch (e) {
-    console.error(`[pdfExport] failed to draw signature for field "${fieldName}":`, e)
-  }
-}
-
-// Remove any remaining signature-type fields before flattening.
-// Prevents "Unexpected N type" errors from Adobe Sign fields pdf-lib can't serialize.
-function removeUnhandledSignatureFields(form) {
-  for (const field of form.getFields()) {
-    const name = field.getName()
-    if (name.toLowerCase().includes('signature') || name.includes('_es_:signer')) {
-      try { form.removeField(field) } catch { /* already removed */ }
-    }
+    console.error(`[pdfExport] draw failed for field "${fieldName}":`, e)
   }
 }
 
 /* ─── Core fill functions — return a filled PDFDocument (not yet flattened) ─── */
 
 export async function fillTimeOffDoc(request, submitterUser, supervisorUser) {
+  console.log('[fillTimeOffDoc] start', { request, submitterUser, supervisorUser })
+
   const templateBytes = await fetch('/pdf/TIME_OFF_REQUEST.pdf').then(r => r.arrayBuffer())
+  console.log('[fillTimeOffDoc] templateBytes byteLength:', templateBytes.byteLength)
+
   const pdfDoc = await PDFDocument.load(templateBytes)
+  console.log('[fillTimeOffDoc] pdfDoc:', pdfDoc)
+
   const form = pdfDoc.getForm()
+  console.log('[fillTimeOffDoc] form:', form)
+
   const page = pdfDoc.getPage(0)
+  console.log('[fillTimeOffDoc] page:', page)
 
   form.getTextField('NAME').setText(submitterUser?.name || '')
   form.getTextField('DATE OF REQUEST').setText(request.request_date || '')
@@ -108,18 +107,31 @@ export async function fillTimeOffDoc(request, submitterUser, supervisorUser) {
   if (request.dates_notes) datesStr += datesStr ? ` (${request.dates_notes})` : request.dates_notes
   form.getTextField('DATES').setText(datesStr)
 
+  console.log('[fillTimeOffDoc] about to draw sig1 (supervisor):', supervisorUser?.signature_png?.slice(0, 40))
   await drawSignatureAtField(pdfDoc, form, page, 'Signature1_es_:signer:signature', supervisorUser?.signature_png)
+  console.log('[fillTimeOffDoc] sig1 done')
+
+  console.log('[fillTimeOffDoc] about to draw sig2 (submitter):', submitterUser?.signature_png?.slice(0, 40))
   await drawSignatureAtField(pdfDoc, form, page, 'Signature2_es_:signer:signature', submitterUser?.signature_png)
-  removeUnhandledSignatureFields(form)
+  console.log('[fillTimeOffDoc] sig2 done, returning pdfDoc')
 
   return pdfDoc
 }
 
 export async function fillOvertimeDoc(request, submitterUser, staffOfficerUser, deptHeadUser) {
+  console.log('[fillOvertimeDoc] start', { request, submitterUser, staffOfficerUser, deptHeadUser })
+
   const templateBytes = await fetch('/pdf/STATEMENT_OF_OVERTIME.pdf').then(r => r.arrayBuffer())
+  console.log('[fillOvertimeDoc] templateBytes byteLength:', templateBytes.byteLength)
+
   const pdfDoc = await PDFDocument.load(templateBytes)
+  console.log('[fillOvertimeDoc] pdfDoc:', pdfDoc)
+
   const form = pdfDoc.getForm()
+  console.log('[fillOvertimeDoc] form:', form)
+
   const page = pdfDoc.getPage(0)
+  console.log('[fillOvertimeDoc] page:', page)
 
   form.getTextField('DATE WORKED').setText(request.date_worked || '')
   form.getTextField('TIME WORKED').setText(request.time_worked || '')
@@ -133,10 +145,17 @@ export async function fillOvertimeDoc(request, submitterUser, staffOfficerUser, 
   if (payComp === 'payment') form.getTextField('REQUEST PAYMENT').setText('X')
   if (payComp === 'comp') form.getTextField('REQUEST COMP TIME').setText('X')
 
+  console.log('[fillOvertimeDoc] about to draw sig1 (submitter):', submitterUser?.signature_png?.slice(0, 40))
   await drawSignatureAtField(pdfDoc, form, page, 'Signature1_es_:signer:signature', submitterUser?.signature_png)
+  console.log('[fillOvertimeDoc] sig1 done')
+
+  console.log('[fillOvertimeDoc] about to draw staff officer sig:', staffOfficerUser?.signature_png?.slice(0, 40))
   await drawSignatureAtField(pdfDoc, form, page, 'STAFF OFFICER APPROVING REQUEST', staffOfficerUser?.signature_png)
+  console.log('[fillOvertimeDoc] staff officer sig done')
+
+  console.log('[fillOvertimeDoc] about to draw dept head sig:', deptHeadUser?.signature_png?.slice(0, 40))
   await drawSignatureAtField(pdfDoc, form, page, 'DEPARTMENT HEAD OR AUTHORIZED', deptHeadUser?.signature_png)
-  removeUnhandledSignatureFields(form)
+  console.log('[fillOvertimeDoc] dept head sig done, returning pdfDoc')
 
   return pdfDoc
 }
@@ -145,14 +164,14 @@ export async function fillOvertimeDoc(request, submitterUser, staffOfficerUser, 
 
 export async function exportTimeOffPdf(request, submitterUser, supervisorUser) {
   const pdfDoc = await fillTimeOffDoc(request, submitterUser, supervisorUser)
-  pdfDoc.getForm().flatten()
+  pdfDoc.getForm().flatten({ updateFieldAppearances: false })
   const date = request.request_date || 'undated'
   downloadPdf(await pdfDoc.save(), `TimeOff_${lastName(submitterUser?.name)}_${date}.pdf`)
 }
 
 export async function exportOvertimePdf(request, submitterUser, staffOfficerUser, deptHeadUser) {
   const pdfDoc = await fillOvertimeDoc(request, submitterUser, staffOfficerUser, deptHeadUser)
-  pdfDoc.getForm().flatten()
+  pdfDoc.getForm().flatten({ updateFieldAppearances: false })
   const date = request.date_worked || 'undated'
   downloadPdf(await pdfDoc.save(), `Overtime_${lastName(submitterUser?.name)}_${date}.pdf`)
 }
@@ -184,7 +203,7 @@ export async function mergeRequestsPdf(rows, fetchUsersForRow, onProgress) {
       }
 
       // Flatten this doc so form values bake into page content before copyPages
-      filledDoc.getForm().flatten()
+      filledDoc.getForm().flatten({ updateFieldAppearances: false })
 
       const pageIndices = filledDoc.getPageIndices()
       const copiedPages = await mergedDoc.copyPages(filledDoc, pageIndices)
