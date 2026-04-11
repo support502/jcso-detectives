@@ -14,6 +14,7 @@ import {
   approveTimeOffRequest, approveOvertimeRequest,
   denyTimeOffRequest, denyOvertimeRequest,
   fetchOtherLeaveForPeriod,
+  fetchApprovedRequests, archiveRequests,
 } from './supabase'
 import { exportTimeOffPdf, exportOvertimePdf } from './utils/pdfExport'
 
@@ -2935,6 +2936,222 @@ function PdfMergerView() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   11b. APPROVED REQUESTS — supervisor view of all approved slips
+   ═══════════════════════════════════════════════════════════════════ */
+
+function ApprovedRequestsView({ user }) {
+  const [requests, setRequests] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [selectedKeys, setSelectedKeys] = useState(new Set())
+  const [feedback, setFeedback] = useState('')
+  const [processing, setProcessing] = useState(false)
+
+  useEffect(() => { loadApproved() }, [])
+
+  async function loadApproved() {
+    setLoading(true)
+    try {
+      const data = await fetchApprovedRequests()
+      setRequests(data)
+      setSelectedKeys(new Set())
+    } catch { /* ignore */ }
+    setLoading(false)
+  }
+
+  function showFeedback(msg) {
+    setFeedback(msg)
+    setTimeout(() => setFeedback(''), 3000)
+  }
+
+  function toggleRow(key) {
+    setSelectedKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
+
+  function toggleAll() {
+    const allKeys = requests.map(r => `${r._type}-${r.id}`)
+    if (selectedKeys.size === allKeys.length) {
+      setSelectedKeys(new Set())
+    } else {
+      setSelectedKeys(new Set(allKeys))
+    }
+  }
+
+  async function handleArchiveSelected() {
+    if (selectedKeys.size === 0) return
+    const count = selectedKeys.size
+    if (!confirm(`Archive ${count} request${count !== 1 ? 's' : ''}? They will be removed from this view but kept in the database.`)) return
+    setProcessing(true)
+    try {
+      const items = [...selectedKeys].map(key => {
+        const [type, ...rest] = key.split('-')
+        return { type, id: rest.join('-') }
+      })
+      await archiveRequests(items)
+      showFeedback(`Archived ${count} request${count !== 1 ? 's' : ''}`)
+      loadApproved()
+    } catch (e) {
+      alert('Failed to archive: ' + (e.message || 'Unknown error'))
+    }
+    setProcessing(false)
+  }
+
+  async function handleExportPdf(row) {
+    try {
+      const { data: submitter } = await supabase.from('det_users').select('*').eq('id', row.user_id).single()
+      if (row._type === 'timeoff') {
+        let supervisor = null
+        if (row.supervisor_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.supervisor_user_id).single()
+          supervisor = data
+        }
+        await exportTimeOffPdf(row, submitter, supervisor)
+      } else {
+        let staffOfficer = null, deptHead = null
+        if (row.staff_officer_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.staff_officer_user_id).single()
+          staffOfficer = data
+        }
+        if (row.dept_head_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.dept_head_user_id).single()
+          deptHead = data
+        }
+        await exportOvertimePdf(row, submitter, staffOfficer, deptHead)
+      }
+    } catch (e) {
+      alert('Failed to export PDF: ' + (e.message || 'Unknown error'))
+    }
+  }
+
+  const allKeys = requests.map(r => `${r._type}-${r.id}`)
+  const allSelected = allKeys.length > 0 && selectedKeys.size === allKeys.length
+
+  return (
+    <>
+      {feedback && (
+        <div style={{ ...card, background: '#dcfce7', border: '1px solid #86efac', textAlign: 'center', color: '#166534', fontWeight: 600, fontSize: 14 }}>
+          {feedback}
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ color: s.gray500, fontSize: 14, padding: 8 }}>Loading...</div>
+      ) : requests.length === 0 ? (
+        <div style={{ ...card, textAlign: 'center', color: s.gray500, padding: 40 }}>
+          No approved requests.
+        </div>
+      ) : (
+        <>
+          {/* Bulk action bar */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: s.gray700, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleAll}
+                style={{ cursor: 'pointer' }}
+              />
+              Select All
+            </label>
+            <button
+              onClick={handleArchiveSelected}
+              disabled={selectedKeys.size === 0 || processing}
+              style={{
+                ...btnSecondary, padding: '5px 14px', fontSize: 13,
+                opacity: (selectedKeys.size === 0 || processing) ? 0.4 : 1,
+                cursor: (selectedKeys.size === 0 || processing) ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {processing ? 'Archiving…' : selectedKeys.size > 0 ? `Archive ${selectedKeys.size} request${selectedKeys.size !== 1 ? 's' : ''}` : 'Archive Selected'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {requests.map(row => {
+              const isTO = row._type === 'timeoff'
+              const rowKey = `${row._type}-${row.id}`
+              const isSelected = selectedKeys.has(rowKey)
+
+              return (
+                <div key={rowKey} style={{
+                  ...card, marginBottom: 0,
+                  border: isSelected ? `2px solid ${s.amber}` : '2px solid transparent',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleRow(rowKey)}
+                      style={{ marginTop: 3, flexShrink: 0, cursor: 'pointer' }}
+                    />
+
+                    <div style={{ fontWeight: 700, fontSize: 15, color: s.navy, minWidth: 140 }}>
+                      {row.submitter?.name || 'Unknown'}
+                    </div>
+
+                    <span style={{
+                      background: isTO ? '#dbeafe' : '#ede9fe',
+                      color: isTO ? '#1e40af' : '#5b21b6',
+                      padding: '2px 8px', borderRadius: 4,
+                      fontSize: 11, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap',
+                    }}>
+                      {isTO ? 'Time Off' : 'Overtime'}
+                    </span>
+
+                    <div style={{ flex: 1, minWidth: 160 }}>
+                      {isTO ? (
+                        <div style={{ fontSize: 14, color: s.gray900 }}>
+                          <strong>{row.type}</strong>
+                          {row.type === 'Other' && row.other_code ? ` — ${row.other_code}` : ''}
+                          {' · '}
+                          <strong>{row.hours}</strong> {row.hours === 1 ? 'hr' : 'hrs'}
+                          {row.dates_picked?.length > 0
+                            ? ` · ${fmtShortDate(row.dates_picked[0])}${row.dates_picked.length > 1 ? ` +${row.dates_picked.length - 1}` : ''}`
+                            : ''}
+                          {row.dates_notes ? <span style={{ color: s.gray500 }}> · {row.dates_notes}</span> : ''}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 14, color: s.gray900 }}>
+                          <strong>{fmtShortDate(row.date_worked)}</strong>
+                          {' · '}
+                          <strong>{row.hours_worked}</strong> {row.hours_worked === 1 ? 'hr' : 'hrs'}
+                          {row.purpose
+                            ? <span style={{ color: s.gray500 }}> · {row.purpose.length > 50 ? row.purpose.slice(0, 50) + '…' : row.purpose}</span>
+                            : ''}
+                          {row.payment_or_comp
+                            ? <span style={{ color: s.gray500 }}> · {row.payment_or_comp}</span>
+                            : ''}
+                          {row.grade
+                            ? <span style={{ color: s.gray500 }}> · Grade: {row.grade}</span>
+                            : ''}
+                        </div>
+                      )}
+                      <div style={{ fontSize: 11, color: s.gray500, marginTop: 3 }}>
+                        Submitted {fmtDateTime(row.created_at)}
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+                      <button onClick={() => handleExportPdf(row)}
+                        style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
+                        Export PDF
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    12. SUPERVISOR VIEW — wraps all supervisor tabs
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -2968,6 +3185,7 @@ function SupervisorView({ detectives, user, requireSignature }) {
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'weekly', label: 'Weekly View' },
     { key: 'pending', label: 'Pending Requests' },
+    { key: 'approved', label: 'Approved' },
     { key: 'timeslips', label: 'Time Slips' },
     ...(user.can_access_payroll ? [{ key: 'payroll', label: 'Payroll' }] : []),
     ...(user.can_access_payroll ? [{ key: 'pdf_merger', label: 'PDF Merger' }] : []),
@@ -3004,6 +3222,7 @@ function SupervisorView({ detectives, user, requireSignature }) {
       {tab === 'dashboard' && <Dashboard />}
       {tab === 'weekly' && <WeeklyDetailView detectives={detectives} />}
       {tab === 'pending' && <PendingRequestsView user={user} requireSignature={requireSignature} onCountRefresh={refreshCount} />}
+      {tab === 'approved' && <ApprovedRequestsView user={user} />}
       {tab === 'timeslips' && <TimeSlipsView user={user} requireSignature={requireSignature} />}
       {tab === 'payroll' && <PayrollView detectives={detectives} />}
       {tab === 'pdf_merger' && <PdfMergerView />}

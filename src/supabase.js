@@ -505,3 +505,68 @@ export async function denyOvertimeRequest(requestId, reason) {
   if (error) throw error
   return data
 }
+
+/* ─── Approved Requests (Phase 6b) ─── */
+
+export async function fetchApprovedRequests() {
+  const [timeOffRes, otRes] = await Promise.all([
+    supabase
+      .from('time_off_requests')
+      .select('*')
+      .eq('status', 'approved')
+      .eq('deleted', false)
+      .is('archived_at', null)
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('overtime_requests')
+      .select('*')
+      .eq('status', 'approved')
+      .eq('deleted', false)
+      .is('archived_at', null)
+      .order('created_at', { ascending: false }),
+  ])
+  if (timeOffRes.error) throw timeOffRes.error
+  if (otRes.error) throw otRes.error
+
+  const userIds = [...new Set([
+    ...timeOffRes.data.map(r => r.user_id),
+    ...otRes.data.map(r => r.user_id),
+  ])]
+
+  let usersMap = {}
+  if (userIds.length > 0) {
+    const { data: users, error: usersError } = await supabase
+      .from('det_users')
+      .select('id, name, role, is_captain')
+      .in('id', userIds)
+    if (usersError) throw usersError
+    for (const u of users) usersMap[u.id] = u
+  }
+
+  return [
+    ...timeOffRes.data.map(r => ({ ...r, _type: 'timeoff', submitter: usersMap[r.user_id] || null })),
+    ...otRes.data.map(r => ({ ...r, _type: 'ot', submitter: usersMap[r.user_id] || null })),
+  ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+}
+
+// Archive a batch of requests by setting archived_at = now().
+// ids: array of { type: 'timeoff'|'ot', id: uuid }
+export async function archiveRequests(items) {
+  const now = new Date().toISOString()
+  const timeOffIds = items.filter(i => i.type === 'timeoff').map(i => i.id)
+  const otIds = items.filter(i => i.type === 'ot').map(i => i.id)
+
+  const ops = []
+  if (timeOffIds.length > 0) {
+    ops.push(
+      supabase.from('time_off_requests').update({ archived_at: now }).in('id', timeOffIds)
+    )
+  }
+  if (otIds.length > 0) {
+    ops.push(
+      supabase.from('overtime_requests').update({ archived_at: now }).in('id', otIds)
+    )
+  }
+  const results = await Promise.all(ops)
+  for (const r of results) if (r.error) throw r.error
+}
