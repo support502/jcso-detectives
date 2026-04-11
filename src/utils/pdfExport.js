@@ -39,32 +39,50 @@ function downloadPdf(bytes, filename) {
   URL.revokeObjectURL(url)
 }
 
-// Embed a signature PNG into a form field (by field name) as an image overlay
-async function embedSignatureInField(pdfDoc, form, page, fieldName, signatureBase64) {
+// Draw a signature PNG at a form field's widget rectangle, then remove the field.
+// Uses generic getField() to handle any field type (text, signature, etc.).
+async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase64) {
   const raw = toRawBase64(signatureBase64)
   if (!raw) return
-  const pngBytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0))
-  const pngImage = await pdfDoc.embedPng(pngBytes)
+  try {
+    const field = form.getFields().find(f => f.getName() === fieldName)
+    if (!field) { console.warn(`[pdfExport] field not found: ${fieldName}`); return }
 
-  const field = form.getTextField(fieldName)
-  const widgets = field.acroField.getWidgets()
-  if (widgets.length === 0) return
-  const rect = widgets[0].getRectangle()
+    const widgets = field.acroField.getWidgets()
+    if (widgets.length === 0) { console.warn(`[pdfExport] no widgets for: ${fieldName}`); return }
+    const rect = widgets[0].getRectangle()
 
-  // Scale image to fit within the field rectangle while maintaining aspect ratio
-  const scale = Math.min(rect.width / pngImage.width, rect.height / pngImage.height)
-  const drawWidth = pngImage.width * scale
-  const drawHeight = pngImage.height * scale
+    const pngBytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0))
+    const pngImage = await pdfDoc.embedPng(pngBytes)
 
-  page.drawImage(pngImage, {
-    x: rect.x + (rect.width - drawWidth) / 2,
-    y: rect.y + (rect.height - drawHeight) / 2,
-    width: drawWidth,
-    height: drawHeight,
-  })
+    const scale = Math.min(rect.width / pngImage.width, rect.height / pngImage.height)
+    const drawWidth = pngImage.width * scale
+    const drawHeight = pngImage.height * scale
 
-  // Remove the field so placeholder text doesn't render over the image
-  form.removeField(field)
+    page.drawImage(pngImage, {
+      x: rect.x + (rect.width - drawWidth) / 2,
+      y: rect.y + (rect.height - drawHeight) / 2,
+      width: drawWidth,
+      height: drawHeight,
+    })
+
+    form.removeField(field)
+  } catch (e) {
+    console.error(`[pdfExport] failed to draw signature for field "${fieldName}":`, e)
+  }
+}
+
+// Remove any signature-like fields still on the form (ones drawSignatureAtField skipped
+// because the PNG was null, or ones we don't know about). Prevents flatten errors on
+// Adobe Sign signature field types that pdf-lib can't serialize.
+function removeUnhandledSignatureFields(form) {
+  for (const field of form.getFields()) {
+    const name = field.getName()
+    // Signature fields from Adobe Sign, or any field type pdf-lib doesn't recognise
+    if (name.toLowerCase().includes('signature') || name.includes('_es_:signer')) {
+      try { form.removeField(field) } catch { /* already removed */ }
+    }
+  }
 }
 
 /* ─── Time Off PDF ─── */
@@ -100,13 +118,12 @@ export async function exportTimeOffPdf(request, submitterUser, supervisorUser) {
   }
   form.getTextField('DATES').setText(datesStr)
 
-  // Signatures — supervisor = Signature1, submitter = Signature2
-  if (supervisorUser?.signature_png) {
-    await embedSignatureInField(pdfDoc, form, page, 'Signature1_es_:signer:signature', supervisorUser.signature_png)
-  }
-  if (submitterUser?.signature_png) {
-    await embedSignatureInField(pdfDoc, form, page, 'Signature2_es_:signer:signature', submitterUser.signature_png)
-  }
+  // Signatures — draw PNG at widget rect, then remove the field (works for any field type)
+  await drawSignatureAtField(pdfDoc, form, page, 'Signature1_es_:signer:signature', supervisorUser?.signature_png)
+  await drawSignatureAtField(pdfDoc, form, page, 'Signature2_es_:signer:signature', submitterUser?.signature_png)
+
+  // Remove any remaining signature-type fields that weren't drawn (no PNG) so flatten doesn't choke
+  removeUnhandledSignatureFields(form)
 
   form.flatten()
   const pdfBytes = await pdfDoc.save()
@@ -137,20 +154,13 @@ export async function exportOvertimePdf(request, submitterUser, staffOfficerUser
   if (payComp === 'payment') form.getTextField('REQUEST PAYMENT').setText('X')
   if (payComp === 'comp') form.getTextField('REQUEST COMP TIME').setText('X')
 
-  // Submitter signature — Signature1 is a text field but we draw an image
-  if (submitterUser?.signature_png) {
-    await embedSignatureInField(pdfDoc, form, page, 'Signature1_es_:signer:signature', submitterUser.signature_png)
-  }
+  // Signatures — draw PNG at widget rect, then remove the field
+  await drawSignatureAtField(pdfDoc, form, page, 'Signature1_es_:signer:signature', submitterUser?.signature_png)
+  await drawSignatureAtField(pdfDoc, form, page, 'STAFF OFFICER APPROVING REQUEST', staffOfficerUser?.signature_png)
+  await drawSignatureAtField(pdfDoc, form, page, 'DEPARTMENT HEAD OR AUTHORIZED', deptHeadUser?.signature_png)
 
-  // Staff Officer — text field, draw image at widget rect
-  if (staffOfficerUser?.signature_png) {
-    await embedSignatureInField(pdfDoc, form, page, 'STAFF OFFICER APPROVING REQUEST', staffOfficerUser.signature_png)
-  }
-
-  // Department Head — text field, draw image at widget rect
-  if (deptHeadUser?.signature_png) {
-    await embedSignatureInField(pdfDoc, form, page, 'DEPARTMENT HEAD OR AUTHORIZED', deptHeadUser.signature_png)
-  }
+  // Remove any remaining signature-type fields that weren't drawn so flatten doesn't choke
+  removeUnhandledSignatureFields(form)
 
   form.flatten()
   const pdfBytes = await pdfDoc.save()
