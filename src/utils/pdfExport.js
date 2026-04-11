@@ -1,4 +1,4 @@
-import { PDFDocument } from 'pdf-lib'
+import { PDFDocument, PDFName } from 'pdf-lib'
 
 /* ─── Helpers ─── */
 
@@ -38,10 +38,9 @@ function downloadPdf(bytes, filename) {
   URL.revokeObjectURL(url)
 }
 
-// Draw a signature PNG at a form field's widget rectangle, then remove the field.
-// Works for any field type (text, Adobe Sign signature, etc.).
-// Does NOT call removeField — Adobe Sign fields throw in removeField because they
-// have no appearance stream. The orphan field is invisible after flatten({ updateFieldAppearances: false }).
+// Draw a signature PNG at a form field's widget rectangle.
+// Does NOT call removeField — that throws on Adobe Sign fields (no appearance stream).
+// The field is removed by removeSignatureFieldsLowLevel before flatten.
 async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase64) {
   const raw = toRawBase64(signatureBase64)
   if (!raw) return
@@ -72,7 +71,55 @@ async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase
   }
 }
 
-/* ─── Core fill functions — return a filled PDFDocument (not yet flattened) ─── */
+// Low-level removal of Adobe Sign / signer signature fields before flatten().
+// form.removeField() crashes on these because they have no appearance stream and
+// pdf-lib's removal path tries to read getNormalAppearance().
+// Instead: strip their widget annotation refs from each page's Annots array, then
+// remove the field refs from the AcroForm's top-level Fields array.
+// The drawn signature images are already baked into the page content stream by drawImage()
+// and are unaffected.
+function removeSignatureFieldsLowLevel(pdfDoc, form) {
+  const acroForm = pdfDoc.catalog.getOrCreateAcroForm()
+
+  for (const field of form.getFields()) {
+    const name = field.getName()
+    if (!name.includes('_es_:signer') && !name.toLowerCase().includes('signature')) continue
+
+    console.log('[removeSignatureFieldsLowLevel] removing field:', name)
+
+    // 1. Remove each widget annotation ref from its page's Annots array
+    for (const widget of field.acroField.getWidgets()) {
+      for (let i = 0; i < pdfDoc.getPageCount(); i++) {
+        const pageNode = pdfDoc.getPage(i).node
+        const annotsEntry = pageNode.get(PDFName.of('Annots'))
+        if (!annotsEntry) continue
+        const annotsArr = pdfDoc.context.lookup(annotsEntry)
+        if (!annotsArr || !Array.isArray(annotsArr.array)) continue
+        const before = annotsArr.array.length
+        annotsArr.array = annotsArr.array.filter(
+          item => pdfDoc.context.lookup(item) !== widget.dict
+        )
+        if (annotsArr.array.length !== before) {
+          console.log(`[removeSignatureFieldsLowLevel]   removed widget from page ${i} Annots`)
+        }
+      }
+    }
+
+    // 2. Remove field ref from AcroForm top-level Fields array
+    const fieldsEntry = acroForm.dict.get(PDFName.of('Fields'))
+    if (fieldsEntry && Array.isArray(fieldsEntry.array)) {
+      const before = fieldsEntry.array.length
+      fieldsEntry.array = fieldsEntry.array.filter(
+        item => pdfDoc.context.lookup(item) !== field.acroField.dict
+      )
+      if (fieldsEntry.array.length !== before) {
+        console.log(`[removeSignatureFieldsLowLevel]   removed field from AcroForm Fields array`)
+      }
+    }
+  }
+}
+
+/* ─── Core fill functions — return a filled PDFDocument, ready to flatten ─── */
 
 export async function fillTimeOffDoc(request, submitterUser, supervisorUser) {
   console.log('[fillTimeOffDoc] start', { request, submitterUser, supervisorUser })
@@ -113,7 +160,11 @@ export async function fillTimeOffDoc(request, submitterUser, supervisorUser) {
 
   console.log('[fillTimeOffDoc] about to draw sig2 (submitter):', submitterUser?.signature_png?.slice(0, 40))
   await drawSignatureAtField(pdfDoc, form, page, 'Signature2_es_:signer:signature', submitterUser?.signature_png)
-  console.log('[fillTimeOffDoc] sig2 done, returning pdfDoc')
+  console.log('[fillTimeOffDoc] sig2 done')
+
+  console.log('[fillTimeOffDoc] removing signature fields low-level')
+  removeSignatureFieldsLowLevel(pdfDoc, form)
+  console.log('[fillTimeOffDoc] done, returning pdfDoc')
 
   return pdfDoc
 }
@@ -155,7 +206,11 @@ export async function fillOvertimeDoc(request, submitterUser, staffOfficerUser, 
 
   console.log('[fillOvertimeDoc] about to draw dept head sig:', deptHeadUser?.signature_png?.slice(0, 40))
   await drawSignatureAtField(pdfDoc, form, page, 'DEPARTMENT HEAD OR AUTHORIZED', deptHeadUser?.signature_png)
-  console.log('[fillOvertimeDoc] dept head sig done, returning pdfDoc')
+  console.log('[fillOvertimeDoc] dept head sig done')
+
+  console.log('[fillOvertimeDoc] removing signature fields low-level')
+  removeSignatureFieldsLowLevel(pdfDoc, form)
+  console.log('[fillOvertimeDoc] done, returning pdfDoc')
 
   return pdfDoc
 }
@@ -164,14 +219,14 @@ export async function fillOvertimeDoc(request, submitterUser, staffOfficerUser, 
 
 export async function exportTimeOffPdf(request, submitterUser, supervisorUser) {
   const pdfDoc = await fillTimeOffDoc(request, submitterUser, supervisorUser)
-  pdfDoc.getForm().flatten({ updateFieldAppearances: false })
+  pdfDoc.getForm().flatten()
   const date = request.request_date || 'undated'
   downloadPdf(await pdfDoc.save(), `TimeOff_${lastName(submitterUser?.name)}_${date}.pdf`)
 }
 
 export async function exportOvertimePdf(request, submitterUser, staffOfficerUser, deptHeadUser) {
   const pdfDoc = await fillOvertimeDoc(request, submitterUser, staffOfficerUser, deptHeadUser)
-  pdfDoc.getForm().flatten({ updateFieldAppearances: false })
+  pdfDoc.getForm().flatten()
   const date = request.date_worked || 'undated'
   downloadPdf(await pdfDoc.save(), `Overtime_${lastName(submitterUser?.name)}_${date}.pdf`)
 }
@@ -202,8 +257,7 @@ export async function mergeRequestsPdf(rows, fetchUsersForRow, onProgress) {
         filledDoc = await fillOvertimeDoc(row, users.submitter, users.staffOfficer, users.deptHead)
       }
 
-      // Flatten this doc so form values bake into page content before copyPages
-      filledDoc.getForm().flatten({ updateFieldAppearances: false })
+      filledDoc.getForm().flatten()
 
       const pageIndices = filledDoc.getPageIndices()
       const copiedPages = await mergedDoc.copyPages(filledDoc, pageIndices)
