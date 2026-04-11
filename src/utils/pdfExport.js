@@ -56,12 +56,16 @@ async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase
     const pngBytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0))
     const pngImage = await pdfDoc.embedPng(pngBytes)
 
-    const scale = Math.min(rect.width / pngImage.width, rect.height / pngImage.height)
-    const drawWidth = pngImage.width * scale
+    // Scale to fill the field width, preserving aspect ratio.
+    // The widget rect height on these forms is ~14 pt — contain-within-rect would
+    // give a 35×14 pt stamp (nearly invisible). Fill width instead and let the
+    // image height extend naturally above/below the field line.
+    const scale = rect.width / pngImage.width
+    const drawWidth = rect.width
     const drawHeight = pngImage.height * scale
 
     page.drawImage(pngImage, {
-      x: rect.x + (rect.width - drawWidth) / 2,
+      x: rect.x,
       y: rect.y + (rect.height - drawHeight) / 2,
       width: drawWidth,
       height: drawHeight,
@@ -140,6 +144,9 @@ export async function fillTimeOffDoc(request, submitterUser, supervisorUser) {
   form.getTextField('DATE OF REQUEST').setText(request.request_date || '')
   form.getTextField('NUMBER OF HOURS').setText(String(request.hours || ''))
 
+  console.log('[fillTimeOffDoc] request.type raw value:', JSON.stringify(request.type))
+  console.log('[fillTimeOffDoc] all form fields:', form.getFields().map(f => ({ name: f.getName(), type: f.constructor.name })))
+
   const typeMap = {
     vacation: 'VACATION 1',
     comp: 'COMP TIME',
@@ -148,6 +155,7 @@ export async function fillTimeOffDoc(request, submitterUser, supervisorUser) {
     other: 'VACATION 3',
   }
   const typeField = typeMap[(request.type || '').toLowerCase()]
+  console.log('[fillTimeOffDoc] typeField resolved to:', typeField)
   if (typeField) form.getTextField(typeField).setText('X')
 
   let datesStr = formatDatesPicked(request.dates_picked)
