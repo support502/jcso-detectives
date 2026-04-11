@@ -56,5 +56,11 @@ Read-only. Never modify these files — openpyxl loads them as base and fills da
 ## Deployment
 **URL**: jcso-detectives.vercel.app
 
+## Phase 6 — PDF Export for Time Off & Overtime Slips
+- Client-side PDF generation using pdf-lib against AcroForm templates in `public/pdf/`
+- `src/utils/pdfExport.js` exports `exportTimeOffPdf` and `exportOvertimePdf`
+- Fills form fields, embeds signature PNGs, flattens, triggers browser download
+- Export PDF button on Time Slips tab (supervisor's own rows) and Pending Requests tab (all rows) — supervisor-only
+
 ## TODO
 - (none)

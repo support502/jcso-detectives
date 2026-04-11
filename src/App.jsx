@@ -15,6 +15,7 @@ import {
   denyTimeOffRequest, denyOvertimeRequest,
   fetchOtherLeaveForPeriod,
 } from './supabase'
+import { exportTimeOffPdf, exportOvertimePdf } from './utils/pdfExport'
 
 /* ═══════════════════════════════════════════════════════════════════
    1. CONSTANTS — unit field definitions and detective roster
@@ -1038,6 +1039,36 @@ function TimeSlipsView({ user, requireSignature }) {
     setShowForm(row._type === 'timeoff' ? 'timeoff' : 'ot')
   }
 
+  const isSupervisor = user.role === 'supervisor'
+
+  async function handleExportPdf(row) {
+    try {
+      // Fetch submitter user record (self in this view)
+      const { data: submitter } = await supabase.from('det_users').select('*').eq('id', row.user_id).single()
+      if (row._type === 'timeoff') {
+        let supervisor = null
+        if (row.supervisor_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.supervisor_user_id).single()
+          supervisor = data
+        }
+        await exportTimeOffPdf(row, submitter, supervisor)
+      } else {
+        let staffOfficer = null, deptHead = null
+        if (row.staff_officer_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.staff_officer_user_id).single()
+          staffOfficer = data
+        }
+        if (row.dept_head_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.dept_head_user_id).single()
+          deptHead = data
+        }
+        await exportOvertimePdf(row, submitter, staffOfficer, deptHead)
+      }
+    } catch (e) {
+      alert('Failed to export PDF: ' + (e.message || 'Unknown error'))
+    }
+  }
+
   return (
     <>
       {/* Action buttons */}
@@ -1118,18 +1149,26 @@ function TimeSlipsView({ user, requireSignature }) {
                   </div>
 
                   {/* Edit / Delete — pending rows only */}
-                  {row.status === 'pending' && (
-                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
-                      <button onClick={() => handleEdit(row)}
+                  <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+                    {row.status === 'pending' && (
+                      <>
+                        <button onClick={() => handleEdit(row)}
+                          style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
+                          Edit
+                        </button>
+                        <button onClick={() => handleDelete(row)}
+                          style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13, color: s.red }}>
+                          Delete
+                        </button>
+                      </>
+                    )}
+                    {isSupervisor && (
+                      <button onClick={() => handleExportPdf(row)}
                         style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
-                        Edit
+                        Export PDF
                       </button>
-                      <button onClick={() => handleDelete(row)}
-                        style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13, color: s.red }}>
-                        Delete
-                      </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               </div>
             )
@@ -1266,6 +1305,34 @@ function PendingRequestsView({ user, requireSignature, onCountRefresh }) {
     } catch { alert('Failed to delete request.') }
   }
 
+  async function handleExportPdf(row) {
+    try {
+      // submitter is already attached to the row, but we need signature_png
+      const { data: submitter } = await supabase.from('det_users').select('*').eq('id', row.user_id).single()
+      if (row._type === 'timeoff') {
+        let supervisor = null
+        if (row.supervisor_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.supervisor_user_id).single()
+          supervisor = data
+        }
+        await exportTimeOffPdf(row, submitter, supervisor)
+      } else {
+        let staffOfficer = null, deptHead = null
+        if (row.staff_officer_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.staff_officer_user_id).single()
+          staffOfficer = data
+        }
+        if (row.dept_head_user_id) {
+          const { data } = await supabase.from('det_users').select('*').eq('id', row.dept_head_user_id).single()
+          deptHead = data
+        }
+        await exportOvertimePdf(row, submitter, staffOfficer, deptHead)
+      }
+    } catch (e) {
+      alert('Failed to export PDF: ' + (e.message || 'Unknown error'))
+    }
+  }
+
   function toggleRow(key) {
     setSelectedIds(prev => {
       const next = new Set(prev)
@@ -1400,6 +1467,10 @@ function PendingRequestsView({ user, requireSignature, onCountRefresh }) {
                       <button onClick={() => handleDelete(row)}
                         style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
                         Delete
+                      </button>
+                      <button onClick={() => handleExportPdf(row)}
+                        style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
+                        Export PDF
                       </button>
                     </div>
                   </div>

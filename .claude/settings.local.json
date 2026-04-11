@@ -8,7 +8,12 @@
       "Bash(python3:*)",
       "Bash(ls c:/Users/bchow/Downloads/jcso-detectives/vite.config.*)",
       "Bash(npm uninstall:*)",
-      "Bash(pip3 install:*)"
+      "Bash(pip3 install:*)",
+      "Bash(node -e ':*)",
+      "Bash(node -e \"require\\('./node_modules/pdf-lib/package.json'\\) && console.log\\('ok', require\\('./node_modules/pdf-lib/package.json'\\).version\\)\")",
+      "Bash(node -e \"const pkg = require\\('./node_modules/react-day-picker/package.json'\\); console.log\\('exports:', JSON.stringify\\(Object.keys\\(pkg.exports || {}\\), null, 2\\)\\)\")",
+      "Bash(cp \"/Users/brianchowns/Downloads/jcso-detectives/public/pdf/TIME OFF REQUEST.pdf\" \"/Users/brianchowns/Downloads/jcso-detectives/public/pdf/TIME_OFF_REQUEST.pdf\")",
+      "Bash(cp \"/Users/brianchowns/Downloads/jcso-detectives/public/pdf/STATEMENT OF OVERTIME.pdf\" \"/Users/brianchowns/Downloads/jcso-detectives/public/pdf/STATEMENT_OF_OVERTIME.pdf\")"
     ]
   }
 }
