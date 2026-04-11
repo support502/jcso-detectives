@@ -12,7 +12,6 @@ function toRawBase64(str) {
 function formatDatesPicked(dates) {
   if (!dates || dates.length === 0) return ''
   const parsed = dates.map(d => new Date(d + 'T00:00:00'))
-  // Group by month+year
   const month = parsed[0].toLocaleDateString('en-US', { month: 'long' })
   const year = parsed[0].getFullYear()
   const days = parsed.map(d => d.getDate())
@@ -40,7 +39,7 @@ function downloadPdf(bytes, filename) {
 }
 
 // Draw a signature PNG at a form field's widget rectangle, then remove the field.
-// Uses generic getField() to handle any field type (text, signature, etc.).
+// Works for any field type (text, Adobe Sign signature, etc.).
 async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase64) {
   const raw = toRawBase64(signatureBase64)
   if (!raw) return
@@ -72,33 +71,29 @@ async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase
   }
 }
 
-// Remove any signature-like fields still on the form (ones drawSignatureAtField skipped
-// because the PNG was null, or ones we don't know about). Prevents flatten errors on
-// Adobe Sign signature field types that pdf-lib can't serialize.
+// Remove any remaining signature-type fields before flattening.
+// Prevents "Unexpected N type" errors from Adobe Sign fields pdf-lib can't serialize.
 function removeUnhandledSignatureFields(form) {
   for (const field of form.getFields()) {
     const name = field.getName()
-    // Signature fields from Adobe Sign, or any field type pdf-lib doesn't recognise
     if (name.toLowerCase().includes('signature') || name.includes('_es_:signer')) {
       try { form.removeField(field) } catch { /* already removed */ }
     }
   }
 }
 
-/* ─── Time Off PDF ─── */
+/* ─── Core fill functions — return a filled PDFDocument (not yet flattened) ─── */
 
-export async function exportTimeOffPdf(request, submitterUser, supervisorUser) {
+export async function fillTimeOffDoc(request, submitterUser, supervisorUser) {
   const templateBytes = await fetch('/pdf/TIME_OFF_REQUEST.pdf').then(r => r.arrayBuffer())
   const pdfDoc = await PDFDocument.load(templateBytes)
   const form = pdfDoc.getForm()
   const page = pdfDoc.getPage(0)
 
-  // Text fields
   form.getTextField('NAME').setText(submitterUser?.name || '')
   form.getTextField('DATE OF REQUEST').setText(request.request_date || '')
   form.getTextField('NUMBER OF HOURS').setText(String(request.hours || ''))
 
-  // Checkbox-style text fields — set "X" for the matching type
   const typeMap = {
     vacation: 'VACATION 1',
     comp: 'COMP TIME',
@@ -107,40 +102,25 @@ export async function exportTimeOffPdf(request, submitterUser, supervisorUser) {
     other: 'VACATION 3',
   }
   const typeField = typeMap[(request.type || '').toLowerCase()]
-  if (typeField) {
-    form.getTextField(typeField).setText('X')
-  }
+  if (typeField) form.getTextField(typeField).setText('X')
 
-  // Dates field
   let datesStr = formatDatesPicked(request.dates_picked)
-  if (request.dates_notes) {
-    datesStr += datesStr ? ` (${request.dates_notes})` : request.dates_notes
-  }
+  if (request.dates_notes) datesStr += datesStr ? ` (${request.dates_notes})` : request.dates_notes
   form.getTextField('DATES').setText(datesStr)
 
-  // Signatures — draw PNG at widget rect, then remove the field (works for any field type)
   await drawSignatureAtField(pdfDoc, form, page, 'Signature1_es_:signer:signature', supervisorUser?.signature_png)
   await drawSignatureAtField(pdfDoc, form, page, 'Signature2_es_:signer:signature', submitterUser?.signature_png)
-
-  // Remove any remaining signature-type fields that weren't drawn (no PNG) so flatten doesn't choke
   removeUnhandledSignatureFields(form)
 
-  form.flatten()
-  const pdfBytes = await pdfDoc.save()
-
-  const date = request.request_date || 'undated'
-  downloadPdf(pdfBytes, `TimeOff_${lastName(submitterUser?.name)}_${date}.pdf`)
+  return pdfDoc
 }
 
-/* ─── Overtime PDF ─── */
-
-export async function exportOvertimePdf(request, submitterUser, staffOfficerUser, deptHeadUser) {
+export async function fillOvertimeDoc(request, submitterUser, staffOfficerUser, deptHeadUser) {
   const templateBytes = await fetch('/pdf/STATEMENT_OF_OVERTIME.pdf').then(r => r.arrayBuffer())
   const pdfDoc = await PDFDocument.load(templateBytes)
   const form = pdfDoc.getForm()
   const page = pdfDoc.getPage(0)
 
-  // Direct text fields
   form.getTextField('DATE WORKED').setText(request.date_worked || '')
   form.getTextField('TIME WORKED').setText(request.time_worked || '')
   form.getTextField('REG SHIFT TIME').setText(request.reg_shift_time || '')
@@ -149,22 +129,81 @@ export async function exportOvertimePdf(request, submitterUser, staffOfficerUser
   form.getTextField('PURPOSE OF OVERTIME').setText(request.purpose || '')
   form.getTextField('GRADE').setText(request.grade || '')
 
-  // Payment / comp checkboxes
   const payComp = (request.payment_or_comp || '').toLowerCase()
   if (payComp === 'payment') form.getTextField('REQUEST PAYMENT').setText('X')
   if (payComp === 'comp') form.getTextField('REQUEST COMP TIME').setText('X')
 
-  // Signatures — draw PNG at widget rect, then remove the field
   await drawSignatureAtField(pdfDoc, form, page, 'Signature1_es_:signer:signature', submitterUser?.signature_png)
   await drawSignatureAtField(pdfDoc, form, page, 'STAFF OFFICER APPROVING REQUEST', staffOfficerUser?.signature_png)
   await drawSignatureAtField(pdfDoc, form, page, 'DEPARTMENT HEAD OR AUTHORIZED', deptHeadUser?.signature_png)
-
-  // Remove any remaining signature-type fields that weren't drawn so flatten doesn't choke
   removeUnhandledSignatureFields(form)
 
-  form.flatten()
-  const pdfBytes = await pdfDoc.save()
+  return pdfDoc
+}
 
+/* ─── Single-request export (existing public API — unchanged behavior) ─── */
+
+export async function exportTimeOffPdf(request, submitterUser, supervisorUser) {
+  const pdfDoc = await fillTimeOffDoc(request, submitterUser, supervisorUser)
+  pdfDoc.getForm().flatten()
+  const date = request.request_date || 'undated'
+  downloadPdf(await pdfDoc.save(), `TimeOff_${lastName(submitterUser?.name)}_${date}.pdf`)
+}
+
+export async function exportOvertimePdf(request, submitterUser, staffOfficerUser, deptHeadUser) {
+  const pdfDoc = await fillOvertimeDoc(request, submitterUser, staffOfficerUser, deptHeadUser)
+  pdfDoc.getForm().flatten()
   const date = request.date_worked || 'undated'
-  downloadPdf(pdfBytes, `Overtime_${lastName(submitterUser?.name)}_${date}.pdf`)
+  downloadPdf(await pdfDoc.save(), `Overtime_${lastName(submitterUser?.name)}_${date}.pdf`)
+}
+
+/* ─── Bulk merge export ─── */
+
+// fetchUsersForRow: async (row) => { submitter, supervisor?, staffOfficer?, deptHead? }
+// onProgress: (done, total) => void — called after each request is processed
+// Returns { skipped: [{ label, reason }] } for caller to surface errors.
+export async function mergeRequestsPdf(rows, fetchUsersForRow, onProgress) {
+  const mergedDoc = await PDFDocument.create()
+  const skipped = []
+  const total = rows.length
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    const label = row._type === 'timeoff'
+      ? `Time Off – ${row.submitter?.name || row.user_id} (${row.request_date || '?'})`
+      : `Overtime – ${row.submitter?.name || row.user_id} (${row.date_worked || '?'})`
+
+    try {
+      const users = await fetchUsersForRow(row)
+      let filledDoc
+
+      if (row._type === 'timeoff') {
+        filledDoc = await fillTimeOffDoc(row, users.submitter, users.supervisor)
+      } else {
+        filledDoc = await fillOvertimeDoc(row, users.submitter, users.staffOfficer, users.deptHead)
+      }
+
+      // Flatten this doc so form values bake into page content before copyPages
+      filledDoc.getForm().flatten()
+
+      const pageIndices = filledDoc.getPageIndices()
+      const copiedPages = await mergedDoc.copyPages(filledDoc, pageIndices)
+      for (const page of copiedPages) mergedDoc.addPage(page)
+    } catch (e) {
+      console.error(`[pdfExport] merge: skipped "${label}":`, e)
+      skipped.push({ label, reason: e.message || 'Unknown error' })
+    }
+
+    onProgress(i + 1, total)
+  }
+
+  if (mergedDoc.getPageCount() === 0) {
+    throw new Error('No pages were successfully generated — nothing to download.')
+  }
+
+  const today = new Date().toISOString().split('T')[0]
+  const filename = `Requests_Merged_${today}_${rows.length}items.pdf`
+  downloadPdf(await mergedDoc.save(), filename)
+
+  return { skipped }
 }

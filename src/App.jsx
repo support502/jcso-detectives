@@ -16,7 +16,7 @@ import {
   fetchOtherLeaveForPeriod,
   fetchApprovedRequests, archiveRequests,
 } from './supabase'
-import { exportTimeOffPdf, exportOvertimePdf } from './utils/pdfExport'
+import { exportTimeOffPdf, exportOvertimePdf, mergeRequestsPdf } from './utils/pdfExport'
 
 /* ═══════════════════════════════════════════════════════════════════
    1. CONSTANTS — unit field definitions and detective roster
@@ -2939,12 +2939,13 @@ function PdfMergerView() {
    11b. APPROVED REQUESTS — supervisor view of all approved slips
    ═══════════════════════════════════════════════════════════════════ */
 
-function ApprovedRequestsView({ user }) {
+function ApprovedRequestsView({ user }) {  // eslint-disable-line no-unused-vars
   const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedKeys, setSelectedKeys] = useState(new Set())
   const [feedback, setFeedback] = useState('')
   const [processing, setProcessing] = useState(false)
+  const [mergeStatus, setMergeStatus] = useState('')
 
   useEffect(() => { loadApproved() }, [])
 
@@ -3026,6 +3027,55 @@ function ApprovedRequestsView({ user }) {
     }
   }
 
+  async function fetchUsersForRow(row) {
+    const { data: submitter } = await supabase.from('det_users').select('*').eq('id', row.user_id).single()
+    if (row._type === 'timeoff') {
+      let supervisor = null
+      if (row.supervisor_user_id) {
+        const { data } = await supabase.from('det_users').select('*').eq('id', row.supervisor_user_id).single()
+        supervisor = data
+      }
+      return { submitter, supervisor }
+    } else {
+      let staffOfficer = null, deptHead = null
+      if (row.staff_officer_user_id) {
+        const { data } = await supabase.from('det_users').select('*').eq('id', row.staff_officer_user_id).single()
+        staffOfficer = data
+      }
+      if (row.dept_head_user_id) {
+        const { data } = await supabase.from('det_users').select('*').eq('id', row.dept_head_user_id).single()
+        deptHead = data
+      }
+      return { submitter, staffOfficer, deptHead }
+    }
+  }
+
+  async function handleMergeExport() {
+    if (selectedKeys.size === 0) return
+    // Use list order, not selection order
+    const selectedRows = requests.filter(r => selectedKeys.has(`${r._type}-${r.id}`))
+    const total = selectedRows.length
+    setProcessing(true)
+    setMergeStatus(total >= 10 ? `Merging 0 of ${total}…` : '')
+    try {
+      const { skipped } = await mergeRequestsPdf(
+        selectedRows,
+        fetchUsersForRow,
+        (done, tot) => {
+          if (tot >= 10) setMergeStatus(`Merging ${done} of ${tot}…`)
+        }
+      )
+      if (skipped.length > 0) {
+        alert(`Merged successfully, but ${skipped.length} request${skipped.length !== 1 ? 's' : ''} were skipped:\n\n` +
+          skipped.map(s => `• ${s.label}: ${s.reason}`).join('\n'))
+      }
+    } catch (e) {
+      alert('Merge failed: ' + (e.message || 'Unknown error'))
+    }
+    setMergeStatus('')
+    setProcessing(false)
+  }
+
   const allKeys = requests.map(r => `${r._type}-${r.id}`)
   const allSelected = allKeys.length > 0 && selectedKeys.size === allKeys.length
 
@@ -3065,7 +3115,18 @@ function ApprovedRequestsView({ user }) {
                 cursor: (selectedKeys.size === 0 || processing) ? 'not-allowed' : 'pointer',
               }}
             >
-              {processing ? 'Archiving…' : selectedKeys.size > 0 ? `Archive ${selectedKeys.size} request${selectedKeys.size !== 1 ? 's' : ''}` : 'Archive Selected'}
+              {processing && !mergeStatus ? 'Archiving…' : selectedKeys.size > 0 ? `Archive ${selectedKeys.size} request${selectedKeys.size !== 1 ? 's' : ''}` : 'Archive Selected'}
+            </button>
+            <button
+              onClick={handleMergeExport}
+              disabled={selectedKeys.size === 0 || processing}
+              style={{
+                ...btnPrimary, padding: '5px 14px', fontSize: 13,
+                opacity: (selectedKeys.size === 0 || processing) ? 0.4 : 1,
+                cursor: (selectedKeys.size === 0 || processing) ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {mergeStatus || (selectedKeys.size > 0 ? `Merge & Export (${selectedKeys.size})` : 'Merge & Export')}
             </button>
           </div>
 
