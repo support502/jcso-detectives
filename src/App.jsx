@@ -1519,9 +1519,9 @@ function PendingRequestsView({ user, requireSignature, onCountRefresh }) {
           {/* Signature preview */}
           <div style={{ marginBottom: 20 }}>
             <label style={label}>Your Signature</label>
-            {user.signature_png ? (
-              <div style={{ border: `1px solid ${s.gray200}`, borderRadius: s.radius, background: s.gray100, padding: 12, textAlign: 'center' }}>
-                <img src={user.signature_png} alt="Your signature" style={{ maxWidth: '100%', maxHeight: 100, objectFit: 'contain' }} />
+            {isSignatureSet(user.signature_png) ? (
+              <div style={{ border: `1px solid ${s.gray200}`, borderRadius: s.radius, background: s.gray100, padding: '10px 16px', minHeight: 56, display: 'flex', alignItems: 'center' }}>
+                <span style={CURSIVE_STYLE}>{user.signature_png}</span>
               </div>
             ) : (
               <div style={{ padding: 12, background: '#fef2f2', borderRadius: s.radius, border: '1px solid #fecaca' }}>
@@ -1540,11 +1540,11 @@ function PendingRequestsView({ user, requireSignature, onCountRefresh }) {
             <button onClick={() => setApproveTarget(null)} style={btnSecondary} disabled={processing}>Cancel</button>
             <button
               onClick={handleConfirmApprove}
-              disabled={processing || !user.signature_png}
+              disabled={processing || !isSignatureSet(user.signature_png)}
               style={{
                 ...btnPrimary,
-                opacity: (processing || !user.signature_png) ? 0.6 : 1,
-                cursor: (processing || !user.signature_png) ? 'not-allowed' : 'pointer',
+                opacity: (processing || !isSignatureSet(user.signature_png)) ? 0.6 : 1,
+                cursor: (processing || !isSignatureSet(user.signature_png)) ? 'not-allowed' : 'pointer',
               }}
             >
               {processing ? 'Approving…' : 'Confirm Approval'}
@@ -3292,104 +3292,40 @@ function SupervisorView({ detectives, user, requireSignature }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   13. SIGNATURE MODAL — draw / view stored signature
-   Storage format: full data URL ("data:image/png;base64,...")
-   so it can be dropped directly into <img src> or a PDF embed.
+   13. SIGNATURE MODAL — type a cursive name signature
+   Storage format: plain name string ("Brian Chowns").
+   Legacy data URLs (data:image/...) stored before this migration
+   are treated as "not set" so users are prompted to re-enter.
    ═══════════════════════════════════════════════════════════════════ */
 
-function SignatureModal({ mode, required, signaturePng, onSave, onClose, onRedraw }) {
-  const canvasRef = useRef(null)
-  const isDrawingRef = useRef(false)
-  const lastPosRef = useRef(null)
-  const [drawError, setDrawError] = useState('')
+// Returns true when the stored value is a usable typed-name signature.
+function isSignatureSet(sig) {
+  return Boolean(sig && !sig.startsWith('data:') && sig.length <= 200)
+}
+
+const CURSIVE_STYLE = {
+  fontFamily: '"Dancing Script", cursive',
+  fontSize: 36,
+  color: '#1a1a1a',
+  lineHeight: 1.2,
+}
+
+function SignatureModal({ mode, required, signatureText, onSave, onClose, onRedraw }) {
+  const existing = isSignatureSet(signatureText) ? signatureText : ''
+  const [name, setName] = useState(existing)
+  const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
-  // Fill canvas white whenever we enter draw mode
-  useEffect(() => {
-    if (mode !== 'draw') return
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-  }, [mode])
-
-  function getPos(e) {
-    const canvas = canvasRef.current
-    const rect = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
-    if (e.touches && e.touches.length > 0) {
-      return {
-        x: (e.touches[0].clientX - rect.left) * scaleX,
-        y: (e.touches[0].clientY - rect.top) * scaleY,
-      }
-    }
-    return {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
-    }
-  }
-
-  function startDraw(e) {
-    e.preventDefault()
-    isDrawingRef.current = true
-    lastPosRef.current = getPos(e)
-    setDrawError('')
-  }
-
-  function draw(e) {
-    e.preventDefault()
-    if (!isDrawingRef.current) return
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext('2d')
-    const pos = getPos(e)
-    ctx.beginPath()
-    ctx.moveTo(lastPosRef.current.x, lastPosRef.current.y)
-    ctx.lineTo(pos.x, pos.y)
-    ctx.strokeStyle = '#1a1a1a'
-    ctx.lineWidth = 2.5
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-    ctx.stroke()
-    lastPosRef.current = pos
-  }
-
-  function endDraw(e) {
-    e?.preventDefault()
-    isDrawingRef.current = false
-    lastPosRef.current = null
-  }
-
-  function clearCanvas() {
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext('2d')
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-    setDrawError('')
-  }
-
-  function isCanvasBlank() {
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext('2d')
-    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
-    for (let i = 0; i < data.length; i += 4) {
-      if (data[i] < 255 || data[i + 1] < 255 || data[i + 2] < 255) return false
-    }
-    return true
-  }
-
   async function handleSave() {
-    if (isCanvasBlank()) {
-      setDrawError('Please draw a signature before saving.')
+    if (!name.trim()) {
+      setError('Please type your name.')
       return
     }
     setSaving(true)
     try {
-      const dataUrl = canvasRef.current.toDataURL('image/png')
-      await onSave(dataUrl)
+      await onSave(name.trim())
     } catch (e) {
-      setDrawError('Failed to save: ' + (e.message || 'Unknown error'))
+      setError('Failed to save: ' + (e.message || 'Unknown error'))
       setSaving(false)
     }
   }
@@ -3403,61 +3339,54 @@ function SignatureModal({ mode, required, signaturePng, onSave, onClose, onRedra
       <div style={{
         background: s.white, borderRadius: s.radius * 1.5,
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-        width: '100%', maxWidth: 560, padding: 28, fontFamily: s.font,
+        width: '100%', maxWidth: 480, padding: 28, fontFamily: s.font,
       }}>
         <h2 style={{ margin: '0 0 6px', fontSize: 20, color: s.navy }}>
-          {mode === 'view' ? 'My Signature' : 'Draw Your Signature'}
+          {mode === 'view' ? 'My Signature' : 'Set Up Your Signature'}
         </h2>
-        <p style={{ margin: '0 0 20px', fontSize: 13, color: s.gray500, lineHeight: 1.5 }}>
+        <p style={{ margin: '0 0 16px', fontSize: 13, color: s.gray500, lineHeight: 1.5 }}>
           {mode === 'view'
-            ? 'Your saved signature. Click "Redraw" to replace it.'
-            : 'Use your mouse, finger, or stylus to sign below. This will be used on your time-off and overtime request forms.'}
-          {mode === 'draw' && required && (
-            <><br /><span style={{ color: s.red }}>You need to set up your signature before continuing.</span></>
+            ? 'Your saved signature. Click "Edit" to change it.'
+            : 'Type your name — it will appear in cursive on your forms.'}
+          {mode !== 'view' && required && (
+            <><br /><span style={{ color: s.red }}>You need to set up a signature before continuing.</span></>
           )}
         </p>
 
-        {mode === 'view' ? (
-          <div style={{
-            border: `1px solid ${s.gray200}`, borderRadius: s.radius,
-            background: s.gray100, padding: 16, marginBottom: 20, textAlign: 'center',
-          }}>
-            <img
-              src={signaturePng}
-              alt="Your signature"
-              style={{ maxWidth: '100%', maxHeight: 160, objectFit: 'contain' }}
-            />
-          </div>
-        ) : (
+        {/* Cursive preview — always visible */}
+        <div style={{
+          border: `1px solid ${s.gray200}`, borderRadius: s.radius,
+          background: s.gray100, padding: '10px 16px', marginBottom: 16,
+          minHeight: 64, display: 'flex', alignItems: 'center',
+        }}>
+          <span style={CURSIVE_STYLE}>
+            {name || (mode === 'view' ? existing : 'Your Name')}
+          </span>
+        </div>
+
+        {mode !== 'view' && (
           <>
-            <div style={{ border: `1px solid ${s.gray300}`, borderRadius: s.radius, overflow: 'hidden', marginBottom: 8 }}>
-              <canvas
-                ref={canvasRef}
-                width={500}
-                height={200}
-                style={{ display: 'block', width: '100%', height: 'auto', touchAction: 'none', cursor: 'crosshair' }}
-                onMouseDown={startDraw}
-                onMouseMove={draw}
-                onMouseUp={endDraw}
-                onMouseLeave={endDraw}
-                onTouchStart={startDraw}
-                onTouchMove={draw}
-                onTouchEnd={endDraw}
-              />
-            </div>
-            {drawError && (
-              <p style={{ margin: '0 0 8px', fontSize: 13, color: s.red }}>{drawError}</p>
-            )}
-            <div style={{ marginBottom: 20 }}>
-              <button onClick={clearCanvas} style={btnSecondary}>Clear</button>
-            </div>
+            <input
+              type="text"
+              value={name}
+              onChange={e => { setName(e.target.value); setError('') }}
+              placeholder="Type your full name"
+              autoFocus
+              style={{
+                width: '100%', padding: '10px 12px',
+                border: `1px solid ${s.gray300}`, borderRadius: s.radius,
+                fontSize: 15, fontFamily: s.font, boxSizing: 'border-box',
+                marginBottom: error ? 6 : 16,
+              }}
+            />
+            {error && <p style={{ margin: '0 0 12px', fontSize: 13, color: s.red }}>{error}</p>}
           </>
         )}
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           {mode === 'view' ? (
             <>
-              <button onClick={onRedraw} style={btnSecondary}>Redraw</button>
+              <button onClick={onRedraw} style={btnSecondary}>Edit</button>
               <button onClick={onClose} style={btnPrimary}>Done</button>
             </>
           ) : (
@@ -3540,16 +3469,15 @@ export default function App() {
 
   // Opens SignatureModal if user has no signature, otherwise resolves immediately.
   // Returns a Promise — call before any action that requires a signature.
-  // Not wired into any action yet (Phase 5b).
   function requireSignature() {
-    if (user?.signature_png) return Promise.resolve(true)
+    if (isSignatureSet(user?.signature_png)) return Promise.resolve(true)
     return new Promise((resolve, reject) => {
       setSigModal({ mode: 'draw', required: true, resolve, reject })
     })
   }
 
   function openSigModal() {
-    if (user?.signature_png) {
+    if (isSignatureSet(user?.signature_png)) {
       setSigModal({ mode: 'view', required: false, resolve: null, reject: null })
     } else {
       setSigModal({ mode: 'draw', required: false, resolve: null, reject: null })
@@ -3582,9 +3510,9 @@ export default function App() {
           <button
             onClick={openSigModal}
             style={{ ...btn, background: 'rgba(255,255,255,0.1)', color: s.white, padding: '6px 14px', fontSize: 13 }}
-            title={user.signature_png ? 'View / redraw your signature' : 'Set up your signature'}
+            title={isSignatureSet(user.signature_png) ? 'View / edit your signature' : 'Set up your signature'}
           >
-            {user.signature_png ? '✓ Signature' : 'My Signature'}
+            {isSignatureSet(user.signature_png) ? '✓ Signature' : 'My Signature'}
           </button>
           <button onClick={handleLogout} style={{ ...btn, background: 'rgba(255,255,255,0.1)', color: s.white, padding: '6px 14px', fontSize: 13 }}>
             Sign Out
@@ -3605,7 +3533,7 @@ export default function App() {
         <SignatureModal
           mode={sigModal.mode}
           required={sigModal.required}
-          signaturePng={user.signature_png || null}
+          signatureText={isSignatureSet(user.signature_png) ? user.signature_png : null}
           onSave={handleSaveSignature}
           onClose={closeSigModal}
           onRedraw={() => setSigModal(prev => ({ ...prev, mode: 'draw' }))}
