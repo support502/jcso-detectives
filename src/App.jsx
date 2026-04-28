@@ -3511,6 +3511,8 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
   const [supSig, setSupSig] = useState('')
   const [supRank, setSupRank] = useState('')
   const saveTimerRef = useRef(null)
+  const inFlightRef = useRef(false)
+  const dirtyRef = useRef(false)
   const dataRef = useRef(data)
   dataRef.current = data
 
@@ -3569,12 +3571,19 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
 
   function scheduleSave() {
     if (readOnly || !plan) return
+    dirtyRef.current = true
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    saveTimerRef.current = setTimeout(doSave, 600)
+    saveTimerRef.current = setTimeout(doSave, 1500)
   }
 
+  // Single debounced save. Only one request is allowed in flight at a time;
+  // changes that arrive during a save trip dirtyRef and trigger a follow-up.
   async function doSave() {
     if (readOnly || !plan) return
+    if (inFlightRef.current) return // a follow-up will fire when the in-flight save returns
+    saveTimerRef.current = null
+    inFlightRef.current = true
+    dirtyRef.current = false
     setSaving(true)
     setError('')
     try {
@@ -3583,7 +3592,16 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
     } catch (e) {
       setError('Save failed: ' + e.message)
     }
+    inFlightRef.current = false
     setSaving(false)
+    if (dirtyRef.current) doSave() // trailing save catches any edits made during the request
+  }
+
+  // Manual save: cancel the debounce, save immediately.
+  async function saveNow() {
+    if (readOnly || !plan) return
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null }
+    await doSave()
   }
 
   // Flush pending save on unmount
@@ -3591,7 +3609,7 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current)
       // best-effort final save
-      if (plan && !readOnly) {
+      if (plan && !readOnly && !inFlightRef.current) {
         callOpsApi({ action: 'update', id: plan.id, data: dataRef.current }).catch(() => {})
       }
     }
@@ -3628,7 +3646,7 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
 
   async function handleSubmit() {
     if (!plan) return
-    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); await doSave() }
+    await saveNow()
     if (!confirm('Submit this plan for review? You will not be able to edit it after submission.')) return
     try {
       const updated = await callOpsApi({ action: 'submit', id: plan.id })
@@ -3747,6 +3765,16 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
         <span style={{ fontSize: 12, color: s.gray500 }}>
           {saving ? 'Saving…' : savedAt ? `Saved ${savedAt.toLocaleTimeString()}` : ''}
         </span>
+        {!readOnly && (
+          <button
+            onClick={saveNow}
+            disabled={saving}
+            style={{ ...btnSecondary, padding: '6px 14px', fontSize: 13, opacity: saving ? 0.6 : 1, cursor: saving ? 'not-allowed' : 'pointer' }}
+            title="Save now"
+          >
+            Save
+          </button>
+        )}
       </div>
 
       {error && <p style={{ color: s.red, marginBottom: 12 }}>{error}</p>}
