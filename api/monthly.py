@@ -54,11 +54,12 @@ INTER_DRUG_COLS = {
     'T': 'rx_pills',
 }
 
-# Detective name → (week_rows for stats B–L, week_rows for drugs N–T)
-# Both sets share the same row offsets from the name row
+# Detective name → week rows + totals row for stats and drugs
 INTER_DETECTIVES = {
-    'Jake Droddy':    {'stat_weeks': [11, 12, 13, 14, 15], 'drug_weeks': [11, 12, 13, 14, 15]},
-    'Brigitte Morse': {'stat_weeks': [18, 19, 20, 21, 22], 'drug_weeks': [18, 19, 20, 21, 22]},
+    'Jake Droddy':    {'stat_weeks': [11, 12, 13, 14, 15], 'drug_weeks': [11, 12, 13, 14, 15],
+                       'stat_total_row': 16, 'drug_total_row': 16},
+    'Brigitte Morse': {'stat_weeks': [18, 19, 20, 21, 22], 'drug_weeks': [18, 19, 20, 21, 22],
+                       'stat_total_row': 23, 'drug_total_row': 23},
 }
 
 # ── UNIFORM section (rows 27–55) ──
@@ -80,10 +81,14 @@ UNI_STAT_COLS = {
 # Drug seizure columns N–T for Uniform detectives (right side of sheet):
 # These use different rows than the stat columns
 UNI_DETECTIVES = {
-    'Scott Weaver':  {'stat_weeks': [28, 29, 30, 31, 32], 'drug_weeks': [25, 26, 27, 28, 29]},
-    'Brian Chowns':  {'stat_weeks': [35, 36, 37, 38, 39], 'drug_weeks': [32, 33, 34, 35, 36]},
-    'William Crain': {'stat_weeks': [42, 43, 44, 45, 46], 'drug_weeks': [39, 40, 41, 42, 43]},
-    'Tamara Spikes': {'stat_weeks': [49, 50, 51, 52, 53], 'drug_weeks': [46, 47, 48, 49, 50]},
+    'Scott Weaver':  {'stat_weeks': [28, 29, 30, 31, 32], 'drug_weeks': [25, 26, 27, 28, 29],
+                      'stat_total_row': 33, 'drug_total_row': 30},
+    'Brian Chowns':  {'stat_weeks': [35, 36, 37, 38, 39], 'drug_weeks': [32, 33, 34, 35, 36],
+                      'stat_total_row': 40, 'drug_total_row': 37},
+    'William Crain': {'stat_weeks': [42, 43, 44, 45, 46], 'drug_weeks': [39, 40, 41, 42, 43],
+                      'stat_total_row': 47, 'drug_total_row': 44},
+    'Tamara Spikes': {'stat_weeks': [49, 50, 51, 52, 53], 'drug_weeks': [46, 47, 48, 49, 50],
+                      'stat_total_row': 54, 'drug_total_row': 51},
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -239,6 +244,8 @@ def _fill_uniform_month_sheet(wb, month, year, entries):
 
     def fill_detective(det_name, det_config, stat_cols, drug_cols=None,
                        stat_acc=None, drug_acc=None):
+        det_stat = {}  # col_letter -> running total
+        det_drug = {}
         for wi, ws_str in enumerate(week_starts):
             if wi >= 5:
                 break
@@ -248,6 +255,7 @@ def _fill_uniform_month_sheet(wb, month, year, entries):
                 val = _sum_stats(elist, stat_key)
                 if val is not None:
                     ws[f'{col_letter}{stat_row}'] = val
+                    det_stat[col_letter] = det_stat.get(col_letter, 0) + val
                     if stat_acc is not None:
                         _add(stat_acc, stat_key, val)
             if drug_cols:
@@ -256,15 +264,55 @@ def _fill_uniform_month_sheet(wb, month, year, entries):
                     val = _sum_stats(elist, stat_key)
                     if val is not None:
                         ws[f'{col_letter}{drug_row}'] = val
+                        det_drug[col_letter] = det_drug.get(col_letter, 0) + val
                         if drug_acc is not None:
                             _add(drug_acc, stat_key, val)
+        # Write per-detective totals as static numbers (replacing SUM formulas)
+        for col_letter, total in det_stat.items():
+            ws[f'{col_letter}{det_config["stat_total_row"]}'] = total
+        if drug_cols:
+            for col_letter, total in det_drug.items():
+                ws[f'{col_letter}{det_config["drug_total_row"]}'] = total
+        return det_stat, det_drug
 
+    # Interdiction — accumulate for unit-total row 24
+    inter_stat_unit = {}
+    inter_drug_all = {}
     for det_name, config in INTER_DETECTIVES.items():
-        fill_detective(det_name, config, INTER_STAT_COLS, INTER_DRUG_COLS,
-                       stat_acc=inter_month, drug_acc=drug_month)
+        s, d = fill_detective(det_name, config, INTER_STAT_COLS, INTER_DRUG_COLS,
+                              stat_acc=inter_month, drug_acc=drug_month)
+        for col, v in s.items():
+            inter_stat_unit[col] = inter_stat_unit.get(col, 0) + v
+        for col, v in d.items():
+            inter_drug_all[col] = inter_drug_all.get(col, 0) + v
+
+    # Interdiction Unit Total (row 24, stat cols B–L)
+    for col_letter, total in inter_stat_unit.items():
+        ws[f'{col_letter}24'] = total
+
+    # Uniform — accumulate for unit-total rows 52 and 55
+    uni_stat_unit = {}
+    uni_drug_all = {}
     for det_name, config in UNI_DETECTIVES.items():
-        fill_detective(det_name, config, UNI_STAT_COLS, INTER_DRUG_COLS,
-                       stat_acc=uni_month, drug_acc=drug_month)
+        s, d = fill_detective(det_name, config, UNI_STAT_COLS, INTER_DRUG_COLS,
+                              stat_acc=uni_month, drug_acc=drug_month)
+        for col, v in s.items():
+            uni_stat_unit[col] = uni_stat_unit.get(col, 0) + v
+        for col, v in d.items():
+            uni_drug_all[col] = uni_drug_all.get(col, 0) + v
+
+    # Uniform Total (row 55, stat cols B–L)
+    for col_letter, total in uni_stat_unit.items():
+        ws[f'{col_letter}55'] = total
+
+    # Grand drug total (row 52, drug cols N–T) — all 6 detectives combined
+    grand_drug = {}
+    for col, v in inter_drug_all.items():
+        grand_drug[col] = grand_drug.get(col, 0) + v
+    for col, v in uni_drug_all.items():
+        grand_drug[col] = grand_drug.get(col, 0) + v
+    for col_letter, total in grand_drug.items():
+        ws[f'{col_letter}52'] = total
 
     return inter_month, uni_month, drug_month
 
@@ -334,10 +382,14 @@ def _fill_uc_month_sheet(wb, month, year, entries):
 
     uc_stat_month = {}
     uc_drug_month = {}
+    unit_stat = {}  # col_letter -> total across all UC detectives
+    unit_drug = {}
 
     for det_name, det_config in UC_DETECTIVES.items():
         start = det_config['start_row']
-        # Names are baked into the template — don't overwrite them
+        total_row = start + 6  # template: name+1..+5 = weeks, +6 = Total
+        det_stat = {}
+        det_drug = {}
 
         for wi, ws_str in enumerate(week_starts):
             if wi >= 5:
@@ -349,13 +401,32 @@ def _fill_uc_month_sheet(wb, month, year, entries):
                 val = _sum_stats(elist, stat_key)
                 if val is not None:
                     ws[f'{col_letter}{data_row}'] = val
+                    det_stat[col_letter] = det_stat.get(col_letter, 0) + val
                     _add(uc_stat_month, stat_key, val)
 
             for col_letter, stat_key in UC_DRUG_COLS.items():
                 val = _sum_stats(elist, stat_key)
                 if val is not None:
                     ws[f'{col_letter}{data_row}'] = val
+                    det_drug[col_letter] = det_drug.get(col_letter, 0) + val
                     _add(uc_drug_month, stat_key, val)
+
+        # Write per-detective totals as static numbers (replacing SUM formulas)
+        for col_letter, total in det_stat.items():
+            ws[f'{col_letter}{total_row}'] = total
+        for col_letter, total in det_drug.items():
+            ws[f'{col_letter}{total_row}'] = total
+
+        for col, v in det_stat.items():
+            unit_stat[col] = unit_stat.get(col, 0) + v
+        for col, v in det_drug.items():
+            unit_drug[col] = unit_drug.get(col, 0) + v
+
+    # Write UC Unit Total (row 38, replacing SUM formula)
+    for col_letter, total in unit_stat.items():
+        ws[f'{col_letter}38'] = total
+    for col_letter, total in unit_drug.items():
+        ws[f'{col_letter}38'] = total
 
     return uc_stat_month, uc_drug_month
 
