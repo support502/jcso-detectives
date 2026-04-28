@@ -217,35 +217,36 @@ OPS_TEMPLATE = os.path.join(TEMPLATE_DIR, 'ops_plan_new.xlsx')
 # this many chars, the remainder is written into the secondary block (A333).
 SYNOPSIS_PRIMARY_LIMIT = 1800
 
-# Suspect/resident block field offsets from the block's top row.
-# (col, row_offset, field_key)
+# Suspect/resident block field offsets from the block's TOP LABEL row.
+# Every data cell sits one row below its label, so all offsets are odd.
+# (col, row_offset_from_label, field_key)
 PERSON_FIELDS = [
-    ('D',  0, 'name'),
-    ('D',  2, 'dob'),
-    ('G',  2, 'age'),
-    ('H',  2, 'race'),
-    ('I',  2, 'sex'),
-    ('J',  2, 'height'),
-    ('K',  2, 'weight'),
-    ('D',  4, 'address'),
-    ('D',  6, 'city_state'),
-    ('J',  6, 'zip'),
-    ('D',  8, 'dl_number'),
-    ('J',  8, 'dl_state'),
-    ('D', 10, 'employer'),
-    ('G', 10, 'occupation'),
-    ('J', 10, 'employer_city_state'),
-    ('D', 12, 'criminal_history'),
-    ('J', 12, 'cautions'),
+    ('D',  1, 'name'),
+    ('D',  3, 'dob'),
+    ('G',  3, 'age'),
+    ('H',  3, 'race'),
+    ('I',  3, 'sex'),
+    ('J',  3, 'height'),
+    ('K',  3, 'weight'),
+    ('D',  5, 'address'),
+    ('D',  7, 'city_state'),
+    ('J',  7, 'zip'),
+    ('D',  9, 'dl_number'),
+    ('J',  9, 'dl_state'),
+    ('D', 11, 'employer'),
+    ('G', 11, 'occupation'),
+    ('J', 11, 'employer_city_state'),
+    ('D', 13, 'criminal_history'),
+    ('J', 13, 'cautions'),
 ]
 
-# Block top rows
+# Block label-row anchors (data is filled at label_row + offsets above).
 SUSPECT_BLOCKS = [60, 191, 207, 223]
 RESIDENT_BLOCKS = [76, 238, 254]
 
-# Personnel: 5 columns per row across two tables
-PERSONNEL_TABLE_1 = list(range(99, 119))   # rows 99..118 inclusive (20 rows)
-PERSONNEL_TABLE_2 = list(range(286, 331))  # rows 286..330 inclusive (45 rows)
+# Personnel: row 99 / 286 are LABEL rows; data starts one row below.
+PERSONNEL_TABLE_1 = list(range(100, 119))  # rows 100..118 (19 rows)
+PERSONNEL_TABLE_2 = list(range(287, 331))  # rows 287..330 (44 rows)
 PERSONNEL_ROWS = PERSONNEL_TABLE_1 + PERSONNEL_TABLE_2
 PERSONNEL_COLS = [('A', 'name_contact'), ('E', 'assignment'),
                   ('F', 'agency'), ('H', 'vehicle'), ('J', 'secondary')]
@@ -327,20 +328,28 @@ def _fill_personnel(ws, personnel):
 
 
 def _fill_ci_uc_vehicles(ws, vehicles):
-    """Two fixed slots at rows 93 and 95."""
+    """Two fixed slots on label rows 93 and 95. Layout per row:
+    [B: CI checkbox] [C='CI' label] [D: UC checkbox] [E='UC' label]
+    [F:H='Vehicle/LP:' label] [I:L data]."""
     rows = [93, 95]
     for i, row in enumerate(rows):
         if i >= len(vehicles or []):
             break
         v = vehicles[i] or {}
-        _w(ws, f'C{row}', v.get('type'))
-        _w(ws, f'F{row}', v.get('vehicle_lp'))
+        t = (v.get('type') or '').upper()
+        if t == 'CI':
+            _w(ws, f'B{row}', 'X')
+        elif t == 'UC':
+            _w(ws, f'D{row}', 'X')
+        _w(ws, f'I{row}', v.get('vehicle_lp'))
 
 
 def _fill_agent_ci_contacts(ws, contacts):
-    """Two slots: rows 146/147 and 149/150. The CI/UC indicator is rendered as
-    'X' in C### for CI or E### for UC; name on the type row, number on the
-    row below."""
+    """Two slots — type rows 146/149 (with name), number rows 147/150.
+    Layout per type row:
+    [B: CI checkbox] [C='CI' label] [D: UC checkbox] [E='UC' label]
+    [F='Name:' label] [H..L data].
+    Number row: [F='Number:' label] [H..L data]."""
     slots = [(146, 147), (149, 150)]
     for i, (type_row, num_row) in enumerate(slots):
         if i >= len(contacts or []):
@@ -348,20 +357,20 @@ def _fill_agent_ci_contacts(ws, contacts):
         c = contacts[i] or {}
         t = (c.get('type') or '').upper()
         if t == 'CI':
-            _w(ws, f'C{type_row}', 'X')
+            _w(ws, f'B{type_row}', 'X')
         elif t == 'UC':
-            _w(ws, f'E{type_row}', 'X')
-        _w(ws, f'F{type_row}', c.get('name'))
-        _w(ws, f'F{num_row}', c.get('number'))
+            _w(ws, f'D{type_row}', 'X')
+        _w(ws, f'H{type_row}', c.get('name'))
+        _w(ws, f'H{num_row}', c.get('number'))
 
 
-def _fill_media_contact(ws, row, m):
-    """name in A, title in E, phone in I."""
+def _fill_media_contact(ws, data_row, m):
+    """data_row is the row BELOW the label row. Name → A, Title → E, Phone → I."""
     if not m:
         return
-    _w(ws, f'A{row}', m.get('name'))
-    _w(ws, f'E{row}', m.get('title'))
-    _w(ws, f'I{row}', m.get('phone'))
+    _w(ws, f'A{data_row}', m.get('name'))
+    _w(ws, f'E{data_row}', m.get('title'))
+    _w(ws, f'I{data_row}', m.get('phone'))
 
 
 def _build_workbook(plan):
@@ -378,32 +387,38 @@ def _build_workbook(plan):
     ws = wb.active
 
     # ── Case info ────────────────────────────────────────────────────────
-    _w(ws, 'D11', plan.get('case_number'))
-    _w(ws, 'D12', plan.get('deconfliction'))
-    _w(ws, 'A14', plan.get('case_agent'))
-    _w(ws, 'E14', plan.get('operation_type'))
-    _w(ws, 'I14', plan.get('city_county'))
-    _w(ws, 'A17', plan.get('briefing_datetime'))
-    _w(ws, 'G17', plan.get('operation_datetime'))
+    # Row 11/12: horizontal layout — label in D:F merge, data in G:I merge.
+    _w(ws, 'G11', plan.get('case_number'))
+    _w(ws, 'G12', plan.get('deconfliction'))
+    # Row 14: labels A/E/I; data row 15.
+    _w(ws, 'A15', plan.get('case_agent'))
+    _w(ws, 'E15', plan.get('operation_type'))
+    _w(ws, 'I15', plan.get('city_county'))
+    # Row 17: labels A/G; data row 18.
+    _w(ws, 'A18', plan.get('briefing_datetime'))
+    _w(ws, 'G18', plan.get('operation_datetime'))
 
     # ── Background / synopsis ────────────────────────────────────────────
-    _w(ws, 'B20', plan.get('background_info'))
+    # Label rows B20 / B34; data rows start at B21 / B35 inside large merges.
+    _w(ws, 'B21', plan.get('background_info'))
     primary, overflow = _split_synopsis(plan.get('synopsis') or '')
-    _w(ws, 'B34', primary)
+    _w(ws, 'B35', primary)
     if overflow:
+        # Secondary synopsis area: label A332:L332, data A333:L379.
         _w(ws, 'A333', overflow)
 
     # ── Briefing location ────────────────────────────────────────────────
-    _w(ws, 'A48', plan.get('briefing_address'))
-    _w(ws, 'H48', plan.get('briefing_city_state'))
-    _w(ws, 'K48', plan.get('briefing_zip'))
-    _w(ws, 'A50', plan.get('briefing_other'))
+    # Row 48 labels Address/City/Zip; data row 49. Row 50 label "Other"; data 51.
+    _w(ws, 'A49', plan.get('briefing_address'))
+    _w(ws, 'H49', plan.get('briefing_city_state'))
+    _w(ws, 'K49', plan.get('briefing_zip'))
+    _w(ws, 'A51', plan.get('briefing_other'))
 
     # ── Operation location ───────────────────────────────────────────────
-    _w(ws, 'A54', plan.get('operation_address'))
-    _w(ws, 'H54', plan.get('operation_city_state'))
-    _w(ws, 'K54', plan.get('operation_zip'))
-    _w(ws, 'A56', plan.get('operation_other'))
+    _w(ws, 'A55', plan.get('operation_address'))
+    _w(ws, 'H55', plan.get('operation_city_state'))
+    _w(ws, 'K55', plan.get('operation_zip'))
+    _w(ws, 'A57', plan.get('operation_other'))
 
     # ── Suspects (up to 4) ───────────────────────────────────────────────
     suspects = plan.get('suspects') or []
@@ -426,56 +441,66 @@ def _build_workbook(plan):
     _fill_personnel(ws, plan.get('personnel') or [])
 
     # ── UC signals ───────────────────────────────────────────────────────
-    _w(ws, 'A121', plan.get('uc_arrest_signal'))
-    _w(ws, 'E121', plan.get('uc_no_response'))
-    _w(ws, 'I121', plan.get('uc_full_response'))
-    _w(ws, 'A123', plan.get('uc_audible'))
-    _w(ws, 'A126', plan.get('uc_visual'))
+    # Row 121 has 3 column-header labels (Arrest Signal / No Response / Full
+    # Response). Rows 123 and 126 are the row-label rows (Audible: / Visual:)
+    # with merged data cells alongside. Schema has 5 standalone string fields,
+    # so place each below or beside its closest label.
+    _w(ws, 'A122', plan.get('uc_arrest_signal'))
+    _w(ws, 'E122', plan.get('uc_no_response'))
+    _w(ws, 'I122', plan.get('uc_full_response'))
+    _w(ws, 'B123', plan.get('uc_audible'))   # right of "Audible:" label
+    _w(ws, 'B126', plan.get('uc_visual'))    # right of "Visual:" label
 
     # ── Communications ───────────────────────────────────────────────────
-    _w(ws, 'C132', _x(plan.get('comms_radios')))
-    _w(ws, 'E132', plan.get('comms_channels'))
-    _w(ws, 'C133', _x(plan.get('comms_cell_phones')))
-    _w(ws, 'C134', plan.get('comms_other'))
+    # Checkboxes sit in column B (left of their label in column C).
+    _w(ws, 'B132', _x(plan.get('comms_radios')))
+    _w(ws, 'G132', plan.get('comms_channels'))   # right of "Channel(s):" (E132:F132 label)
+    _w(ws, 'B133', _x(plan.get('comms_cell_phones')))
+    _w(ws, 'D134', plan.get('comms_other'))      # right of "Other:" (C134 label)
 
     # ── Monitoring ───────────────────────────────────────────────────────
-    _w(ws, 'C139', _x(plan.get('monitoring_callyo')))
-    _w(ws, 'C140', _x(plan.get('monitoring_1021')))
-    _w(ws, 'C141', _x(plan.get('monitoring_active')))
-    _w(ws, 'E141', plan.get('monitoring_active_channel'))
+    _w(ws, 'B139', _x(plan.get('monitoring_callyo')))
+    _w(ws, 'B140', _x(plan.get('monitoring_1021')))
+    _w(ws, 'B141', _x(plan.get('monitoring_active')))
+    _w(ws, 'F141', plan.get('monitoring_active_channel'))  # right of "Active Channel:" label
 
     # ── Agent/CI contacts ────────────────────────────────────────────────
     _fill_agent_ci_contacts(ws, plan.get('agent_ci_contacts') or [])
 
     # ── Arrest ───────────────────────────────────────────────────────────
-    _w(ws, 'C155', _x(plan.get('arrest_tbd')))
-    _w(ws, 'C156', _x(plan.get('arrest_anticipated')))
-    _w(ws, 'E156', plan.get('arrest_charge'))
-    _w(ws, 'C157', _x(plan.get('arrest_not_anticipated')))
-    _w(ws, 'C158', plan.get('arrest_other'))
+    _w(ws, 'B155', _x(plan.get('arrest_tbd')))
+    _w(ws, 'B156', _x(plan.get('arrest_anticipated')))
+    _w(ws, 'F156', plan.get('arrest_charge'))    # right of "Charge:" (E156 label)
+    _w(ws, 'B157', _x(plan.get('arrest_not_anticipated')))
+    _w(ws, 'D158', plan.get('arrest_other'))     # right of "Other:" (C158 label)
 
     # ── Medical ──────────────────────────────────────────────────────────
-    _w(ws, 'A163', plan.get('medical_name'))
-    _w(ws, 'G163', plan.get('medical_address'))
-    _w(ws, 'A165', plan.get('medical_city_state'))
-    _w(ws, 'E165', plan.get('medical_zip'))
-    _w(ws, 'G165', plan.get('medical_phone'))
+    # All medical labels are on rows 163/165; data rows are 164/166.
+    _w(ws, 'A164', plan.get('medical_name'))
+    _w(ws, 'G164', plan.get('medical_address'))
+    _w(ws, 'A166', plan.get('medical_city_state'))
+    _w(ws, 'E166', plan.get('medical_zip'))
+    _w(ws, 'G166', plan.get('medical_phone'))
 
     # ── Division supervisors ─────────────────────────────────────────────
-    _w(ws, 'A169', plan.get('captain'))
-    _w(ws, 'G169', plan.get('lt_sergeant'))
+    _w(ws, 'A170', plan.get('captain'))
+    _w(ws, 'G170', plan.get('lt_sergeant'))
 
     # ── Contact numbers ──────────────────────────────────────────────────
-    _w(ws, 'A171', plan.get('contact_numbers'))
+    # A171:L171 is the section label; A172:F172 is the data merge.
+    _w(ws, 'A172', plan.get('contact_numbers'))
 
     # ── Media inquiries ──────────────────────────────────────────────────
-    _fill_media_contact(ws, 175, plan.get('media_contact_1') or {})
-    _fill_media_contact(ws, 177, plan.get('media_contact_2') or {})
+    # Label rows 175 / 177 → data rows 176 / 178.
+    _fill_media_contact(ws, 176, plan.get('media_contact_1') or {})
+    _fill_media_contact(ws, 178, plan.get('media_contact_2') or {})
 
     # ── Supervisor approval ──────────────────────────────────────────────
-    _w(ws, 'A183', plan.get('supervisor_signature'))
-    _w(ws, 'A186', _fmt_signed_date(plan.get('supervisor_signed_at')))
-    _w(ws, 'G186', plan.get('supervisor_rank'))
+    # Horizontal layout: A183:B183 label "Signature" → C183:K183 data;
+    # A186:B186 label "Date" → C186 data; G186:H186 label "Rank" → I186 data.
+    _w(ws, 'C183', plan.get('supervisor_signature'))
+    _w(ws, 'C186', _fmt_signed_date(plan.get('supervisor_signed_at')))
+    _w(ws, 'I186', plan.get('supervisor_rank'))
 
     output = io.BytesIO()
     wb.save(output)
