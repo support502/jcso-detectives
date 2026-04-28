@@ -38,6 +38,32 @@ function downloadPdf(bytes, filename) {
   URL.revokeObjectURL(url)
 }
 
+// Remove the white fill that the signature canvas applies before drawing.
+// Returns a raw base64 PNG with white/near-white pixels made transparent.
+function stripWhiteBackground(rawBase64) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = img.width
+      canvas.height = img.height
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(img, 0, 0)
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      const data = imageData.data
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240) {
+          data[i + 3] = 0
+        }
+      }
+      ctx.putImageData(imageData, 0, 0)
+      resolve(canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''))
+    }
+    img.onerror = reject
+    img.src = `data:image/png;base64,${rawBase64}`
+  })
+}
+
 // Draw a signature PNG at a form field's widget rectangle.
 // Does NOT call removeField — that throws on Adobe Sign fields (no appearance stream).
 // The field is removed by removeSignatureFieldsLowLevel before flatten.
@@ -53,7 +79,8 @@ async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase
   const rect = widgets[0].getRectangle()
 
   try {
-    const pngBytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0))
+    const transparent = await stripWhiteBackground(raw)
+    const pngBytes = Uint8Array.from(atob(transparent), c => c.charCodeAt(0))
     const pngImage = await pdfDoc.embedPng(pngBytes)
 
     // Contain within (field width × 50 pt), preserving aspect ratio.
