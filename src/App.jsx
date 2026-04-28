@@ -3510,6 +3510,7 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
   const [error, setError] = useState('')
   const [supSig, setSupSig] = useState('')
   const [supRank, setSupRank] = useState('')
+  const [exporting, setExporting] = useState(false)
   const saveTimerRef = useRef(null)
   const inFlightRef = useRef(false)
   const dirtyRef = useRef(false)
@@ -3653,6 +3654,38 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
       setPlan(updated)
       onSaved && onSaved()
     } catch (e) { alert('Submit failed: ' + e.message) }
+  }
+
+  async function handleExport() {
+    if (!plan) return
+    // Flush any pending edits before exporting so the .xlsx reflects current state.
+    if (!readOnly) await saveNow()
+    setExporting(true)
+    try {
+      const res = await fetch('/api/ops_plans', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'export', id: plan.id }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || `Server error ${res.status}`)
+      }
+      // Filename comes from Content-Disposition; fall back to a safe default.
+      const cd = res.headers.get('Content-Disposition') || ''
+      const m = cd.match(/filename="?([^"]+)"?/i)
+      const fileName = m ? m[1] : `OPS_PLAN_${plan.id}.xlsx`
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      alert('Export failed: ' + e.message)
+    }
+    setExporting(false)
   }
 
   async function handleApprove() {
@@ -4123,9 +4156,23 @@ function OpsPlanForm({ user, planId, onBack, onSaved }) {
       {/* ── Footer actions ── */}
       <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', marginTop: 20, flexWrap: 'wrap' }}>
         <button style={btnSecondary} onClick={onBack}>← Back to List</button>
-        {!readOnly && status === 'draft' && (
-          <button style={btnPrimary} onClick={handleSubmit}>Submit for Review</button>
-        )}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            style={{
+              ...(status === 'approved' ? btnPrimary : btnSecondary),
+              opacity: exporting ? 0.6 : 1,
+              cursor: exporting ? 'not-allowed' : 'pointer',
+            }}
+            title="Download filled Excel template"
+          >
+            {exporting ? 'Exporting…' : 'Export to Excel'}
+          </button>
+          {!readOnly && status === 'draft' && (
+            <button style={btnPrimary} onClick={handleSubmit}>Submit for Review</button>
+          )}
+        </div>
       </div>
     </div>
   )
