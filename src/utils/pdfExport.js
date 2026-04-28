@@ -56,17 +56,18 @@ async function drawSignatureAtField(pdfDoc, form, page, fieldName, signatureBase
     const pngBytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0))
     const pngImage = await pdfDoc.embedPng(pngBytes)
 
-    // Scale to fill the field width, preserving aspect ratio.
-    // The widget rect height on these forms is ~14 pt — contain-within-rect would
-    // give a 35×14 pt stamp (nearly invisible). Fill width instead and let the
-    // image height extend naturally above/below the field line.
-    const scale = rect.width / pngImage.width
-    const drawWidth = rect.width
+    // Contain within (field width × 50 pt), preserving aspect ratio.
+    // 50 pt is the approximate gap between the DATES line and the signature labels.
+    const MAX_SIG_HEIGHT = 50
+    const scaleByWidth = rect.width / pngImage.width
+    const scaleByHeight = MAX_SIG_HEIGHT / pngImage.height
+    const scale = Math.min(scaleByWidth, scaleByHeight)
+    const drawWidth = pngImage.width * scale
     const drawHeight = pngImage.height * scale
 
     page.drawImage(pngImage, {
-      x: rect.x,
-      y: rect.y + (rect.height - drawHeight) / 2,
+      x: rect.x + (rect.width - drawWidth) / 2,
+      y: rect.y + rect.height,  // image bottom on the signature line (field top edge)
       width: drawWidth,
       height: drawHeight,
     })
