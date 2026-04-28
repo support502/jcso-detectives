@@ -2,6 +2,13 @@ import { PDFDocument, PDFName } from 'pdf-lib'
 
 /* ─── Helpers ─── */
 
+// Convert YYYY-MM-DD to MM-DD-YYYY for printed PDF fields
+function fmtPdfDate(dateStr) {
+  if (!dateStr) return ''
+  const [y, m, d] = dateStr.split('-')
+  return `${m}-${d}-${y}`
+}
+
 // Format dates_picked array as "April 15, 16, 17, 2026"
 function formatDatesPicked(dates) {
   if (!dates || dates.length === 0) return ''
@@ -179,7 +186,7 @@ export async function fillTimeOffDoc(request, submitterUser, supervisorUser) {
   const page = pdfDoc.getPage(0)
 
   form.getTextField('NAME').setText(submitterUser?.name || '')
-  form.getTextField('DATE OF REQUEST').setText(request.request_date || '')
+  form.getTextField('DATE OF REQUEST').setText(fmtPdfDate(request.request_date))
   form.getTextField('NUMBER OF HOURS').setText(String(request.hours || ''))
 
   const typeMap = {
@@ -211,7 +218,7 @@ export async function fillOvertimeDoc(request, submitterUser, staffOfficerUser, 
   const form = pdfDoc.getForm()
   const page = pdfDoc.getPage(0)
 
-  form.getTextField('DATE WORKED').setText(request.date_worked || '')
+  form.getTextField('DATE WORKED').setText(fmtPdfDate(request.date_worked))
   form.getTextField('TIME WORKED').setText(request.time_worked || '')
   form.getTextField('REG SHIFT TIME').setText(request.reg_shift_time || '')
   form.getTextField('NUMBER OF HOURS WORKED').setText(String(request.hours_worked || ''))
