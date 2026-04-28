@@ -72,8 +72,18 @@ async function renderNameToCanvas(name) {
   }
 }
 
+// Normalize a grade string to "PREFIX-NUMBER" format (e.g. "le6" → "LE-6").
+function formatGrade(val) {
+  if (!val) return val
+  const clean = val.trim().toUpperCase().replace(/[-\s]+/g, '')
+  const m = clean.match(/^([A-Z]+)(\d+)$/)
+  return m ? `${m[1]}-${m[2]}` : clean
+}
+
 // Draw a typed cursive name at a form field's widget rectangle.
-// The text baseline is aligned to the field's top edge (the printed signature line).
+// Baseline alignment adapts to field height:
+//   ≤ 16 pt  → thin line-only widget (Time Off form): line is at field top
+//   > 16 pt  → labelled widget (OT form): line is at field bottom
 async function drawSignatureText(pdfDoc, form, page, fieldName, signatureName) {
   if (isLegacySignature(signatureName)) return
 
@@ -97,10 +107,11 @@ async function drawSignatureText(pdfDoc, form, page, fieldName, signatureName) {
     const drawWidth = pngImage.width * scale
     const drawHeight = pngImage.height * scale
 
-    // Position so the text baseline sits exactly on the signature line (field top edge).
-    // The image extends baselineFromBottom * drawHeight below the line (descenders)
-    // and the rest above (ascenders + body).
-    const y = rect.y + rect.height - baselineFromBottom * drawHeight
+    // Determine where the printed signature line is relative to the widget rect.
+    // Thin widgets (h ≤ 16 pt) sit directly on the line → line at rect top.
+    // Taller widgets (h > 16 pt) cover the line + label below → line at rect bottom.
+    const lineY = rect.height <= 16 ? rect.y + rect.height : rect.y
+    const y = lineY - baselineFromBottom * drawHeight
 
     page.drawImage(pngImage, {
       x: rect.x + (rect.width - drawWidth) / 2,
@@ -206,7 +217,7 @@ export async function fillOvertimeDoc(request, submitterUser, staffOfficerUser, 
   form.getTextField('NUMBER OF HOURS WORKED').setText(String(request.hours_worked || ''))
   form.getTextField('CASE NUMBERS').setText(request.case_numbers || '')
   form.getTextField('PURPOSE OF OVERTIME').setText(request.purpose || '')
-  form.getTextField('GRADE').setText(request.grade || '')
+  form.getTextField('GRADE').setText(formatGrade(request.grade) || '')
 
   const payComp = (request.payment_or_comp || '').toLowerCase()
   if (payComp === 'payment') form.getTextField('REQUEST PAYMENT').setText('X')

@@ -876,6 +876,14 @@ function TimeOffForm({ user, onClose, onSaved, requireSignature, editRow }) {
   )
 }
 
+// Normalize grade input to "PREFIX-NUMBER" format (e.g. "le6" → "LE-6").
+function formatGrade(val) {
+  if (!val) return val
+  const clean = val.trim().toUpperCase().replace(/[-\s]+/g, '')
+  const m = clean.match(/^([A-Z]+)(\d+)$/)
+  return m ? `${m[1]}-${m[2]}` : clean
+}
+
 function OvertimeForm({ user, onClose, onSaved, requireSignature, editRow }) {
   const [dateWorked, setDateWorked] = useState(editRow?.date_worked || todayStr())
   const [timeWorked, setTimeWorked] = useState(editRow?.time_worked || '')
@@ -904,7 +912,7 @@ function OvertimeForm({ user, onClose, onSaved, requireSignature, editRow }) {
         case_numbers: caseNumbers.trim() || null,
         purpose: purpose.trim() || null,
         payment_or_comp: request || null,
-        grade: grade.trim() || null,
+        grade: formatGrade(grade.trim()) || null,
         status: 'pending',
         person_signed_at: new Date().toISOString(),
       }
@@ -984,6 +992,7 @@ function OvertimeForm({ user, onClose, onSaved, requireSignature, editRow }) {
       <div style={{ marginBottom: 20 }}>
         <label style={label}>Grade</label>
         <input type="text" value={grade} onChange={e => setGrade(e.target.value)}
+          onBlur={() => setGrade(v => formatGrade(v.trim()) || '')}
           placeholder="e.g., LE3" style={{ ...input, width: 120 }} />
       </div>
 
