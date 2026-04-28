@@ -1642,11 +1642,15 @@ function DetectiveView({ user, requireSignature }) {
         <button style={btnTab(tab === 'timeslips')} onClick={() => setTab('timeslips')}>
           Time Slips
         </button>
+        <button style={btnTab(tab === 'ops_plans')} onClick={() => setTab('ops_plans')}>
+          Ops Plans
+        </button>
       </div>
 
       {tab === 'entry' && <EntryForm user={user} />}
       {tab === 'history' && <HistoryView user={user} />}
       {tab === 'timeslips' && <TimeSlipsView user={user} requireSignature={requireSignature} />}
+      {tab === 'ops_plans' && <OpsPlansView user={user} />}
     </div>
   )
 }
@@ -3257,6 +3261,7 @@ function SupervisorView({ detectives, user, requireSignature }) {
     { key: 'pending', label: 'Pending Requests' },
     { key: 'approved', label: 'Approved' },
     { key: 'timeslips', label: 'Time Slips' },
+    { key: 'ops_plans', label: 'Ops Plans' },
     ...(user.can_access_payroll ? [{ key: 'payroll', label: 'Payroll' }] : []),
     ...(user.can_access_payroll ? [{ key: 'pdf_merger', label: 'PDF Merger' }] : []),
   ]
@@ -3294,9 +3299,833 @@ function SupervisorView({ detectives, user, requireSignature }) {
       {tab === 'pending' && <PendingRequestsView user={user} requireSignature={requireSignature} onCountRefresh={refreshCount} />}
       {tab === 'approved' && <ApprovedRequestsView user={user} />}
       {tab === 'timeslips' && <TimeSlipsView user={user} requireSignature={requireSignature} />}
+      {tab === 'ops_plans' && <OpsPlansView user={user} />}
       {tab === 'payroll' && <PayrollView detectives={detectives} />}
       {tab === 'pdf_merger' && <PdfMergerView />}
     </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   12.5 OPS PLANS — Jefferson County Operational Plan list + form
+   ═══════════════════════════════════════════════════════════════════ */
+
+const OPS_PLAN_EMPTY = {
+  case_number: '', deconfliction: '', case_agent: '', operation_type: '',
+  city_county: '', briefing_datetime: '', operation_datetime: '',
+  background_info: '', synopsis: '',
+  briefing_address: '', briefing_city_state: '', briefing_zip: '', briefing_other: '',
+  operation_address: '', operation_city_state: '', operation_zip: '', operation_other: '',
+  suspects: [], residents: [], ci_uc_vehicles: [{ type: 'CI', vehicle_lp: '' }, { type: 'CI', vehicle_lp: '' }],
+  personnel: [],
+  uc_arrest_signal: '', uc_no_response: '', uc_full_response: '',
+  uc_audible: '', uc_visual: '',
+  comms_radios: false, comms_channels: '', comms_cell_phones: false, comms_other: '',
+  monitoring_callyo: false, monitoring_1021: false,
+  monitoring_active: false, monitoring_active_channel: '',
+  agent_ci_contacts: [{ type: 'CI', name: '', number: '' }, { type: 'CI', name: '', number: '' }],
+  arrest_tbd: false, arrest_anticipated: false, arrest_charge: '',
+  arrest_not_anticipated: false, arrest_other: '',
+  medical_name: '', medical_address: '', medical_city_state: '',
+  medical_zip: '', medical_phone: '',
+  captain: '', lt_sergeant: '', contact_numbers: '',
+  media_contact_1: { name: '', title: '', phone: '' },
+  media_contact_2: { name: '', title: '', phone: '' },
+}
+
+const OPS_SUSPECT_FIELDS = [
+  ['name', 'Name'], ['dob', 'DOB'], ['age', 'Age'], ['race', 'Race'], ['sex', 'Sex'],
+  ['height', 'Height'], ['weight', 'Weight'],
+  ['address', 'Address'], ['city_state', 'City / State'], ['zip', 'Zip'],
+  ['dl_number', 'DL Number'], ['dl_state', 'DL State'],
+  ['employer', 'Employer'], ['occupation', 'Occupation'],
+  ['employer_city_state', 'Employer City / State'],
+  ['criminal_history', 'Criminal History'], ['cautions', 'Cautions'],
+]
+
+const OPS_PERSONNEL_FIELDS = [
+  ['name_contact', 'Name / Contact'],
+  ['assignment', 'Assignment'],
+  ['agency', 'Agency'],
+  ['vehicle', 'Vehicle'],
+  ['secondary', 'Secondary'],
+]
+
+async function callOpsApi(payload) {
+  const res = await fetch('/api/ops_plans', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || `Server error ${res.status}`)
+  }
+  return res.json()
+}
+
+function fmtOpsDate(iso) {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  } catch { return iso }
+}
+
+function StatusBadge({ status }) {
+  const map = {
+    draft: { bg: '#fef3c7', fg: '#92400e', text: 'Draft' },
+    submitted: { bg: '#dbeafe', fg: '#1e40af', text: 'Submitted' },
+    approved: { bg: '#dcfce7', fg: '#166534', text: 'Approved' },
+  }
+  const c = map[status] || map.draft
+  return (
+    <span style={{
+      background: c.bg, color: c.fg, padding: '3px 10px',
+      borderRadius: 12, fontSize: 11, fontWeight: 700,
+      textTransform: 'uppercase', letterSpacing: '0.5px',
+    }}>{c.text}</span>
+  )
+}
+
+const opsSection = {
+  background: s.white,
+  borderRadius: s.radius,
+  boxShadow: s.shadow,
+  padding: 20,
+  marginBottom: 16,
+}
+
+const opsSectionTitle = {
+  margin: '0 0 16px',
+  fontSize: 14,
+  fontWeight: 700,
+  color: s.navy,
+  textTransform: 'uppercase',
+  letterSpacing: '0.5px',
+  paddingBottom: 8,
+  borderBottom: `2px solid ${s.amber}`,
+}
+
+function OpsPlansList({ user, onOpen, onNew }) {
+  const [plans, setPlans] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  async function load() {
+    setLoading(true)
+    setError('')
+    try {
+      const data = await callOpsApi({ action: 'list' })
+      setPlans(data)
+    } catch (e) { setError(e.message) }
+    setLoading(false)
+  }
+
+  useEffect(() => { load() }, [])
+
+  async function handleDelete(plan, e) {
+    e.stopPropagation()
+    if (!confirm(`Delete draft plan ${plan.case_number || '(no case #)'}? This cannot be undone.`)) return
+    try {
+      await callOpsApi({ action: 'delete', id: plan.id })
+      load()
+    } catch (err) {
+      alert('Delete failed: ' + err.message)
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <h2 style={{ margin: 0, fontSize: 20, color: s.navy }}>Operational Plans</h2>
+        <button style={btnPrimary} onClick={onNew}>+ New Plan</button>
+      </div>
+
+      {error && <p style={{ color: s.red }}>{error}</p>}
+      {loading ? (
+        <p style={{ color: s.gray500 }}>Loading…</p>
+      ) : plans.length === 0 ? (
+        <div style={{ ...card, textAlign: 'center', padding: 40, color: s.gray500 }}>
+          No operational plans yet. Click "New Plan" to create one.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {plans.map(p => {
+            const isOwner = p.created_by === user.id
+            const canDelete = isOwner && p.status === 'draft'
+            const isEditable = (isOwner && p.status === 'draft') || (user.role === 'supervisor' && p.status !== 'approved')
+            return (
+              <div
+                key={p.id}
+                onClick={() => onOpen(p.id)}
+                style={{
+                  ...card, marginBottom: 0, padding: 16, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 16,
+                  transition: 'box-shadow 0.15s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.boxShadow = s.shadowLg}
+                onMouseLeave={e => e.currentTarget.style.boxShadow = s.shadow}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 700, color: s.navy, fontSize: 16 }}>
+                      {p.case_number || '(no case #)'}
+                    </span>
+                    <StatusBadge status={p.status} />
+                  </div>
+                  <div style={{ fontSize: 13, color: s.gray700, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                    {p.operation_type && <span><strong>Type:</strong> {p.operation_type}</span>}
+                    {p.case_agent && <span><strong>Agent:</strong> {p.case_agent}</span>}
+                    <span><strong>By:</strong> {p.created_by_name || '—'}</span>
+                    <span><strong>Created:</strong> {fmtOpsDate(p.created_at)}</span>
+                  </div>
+                </div>
+                <span style={{ fontSize: 18, color: s.gray500 }} title={isEditable ? 'Edit' : 'View'}>
+                  {isEditable ? '✏️' : '👁'}
+                </span>
+                {canDelete && (
+                  <button
+                    onClick={e => handleDelete(p, e)}
+                    style={{ ...btnSecondary, padding: '6px 10px', background: '#fee2e2', color: s.red }}
+                    title="Delete draft"
+                  >🗑</button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OpsPlanForm({ user, planId, onBack, onSaved }) {
+  const isNew = !planId
+  const [plan, setPlan] = useState(null)         // server row (incl. id, status)
+  const [data, setData] = useState(OPS_PLAN_EMPTY) // editable fields
+  const [loading, setLoading] = useState(!isNew)
+  const [saving, setSaving] = useState(false)
+  const [savedAt, setSavedAt] = useState(null)
+  const [error, setError] = useState('')
+  const [supSig, setSupSig] = useState('')
+  const [supRank, setSupRank] = useState('')
+  const saveTimerRef = useRef(null)
+  const dataRef = useRef(data)
+  dataRef.current = data
+
+  // Load existing plan or create a new draft up-front so subsequent saves can update by id
+  useEffect(() => {
+    let cancelled = false
+    async function init() {
+      if (isNew) {
+        try {
+          const created = await callOpsApi({
+            action: 'create',
+            created_by: user.id,
+            data: OPS_PLAN_EMPTY,
+          })
+          if (cancelled) return
+          setPlan(created)
+          setData(mergeIntoEmpty(created))
+        } catch (e) { setError('Failed to start new plan: ' + e.message) }
+        return
+      }
+      try {
+        const got = await callOpsApi({ action: 'get', id: planId })
+        if (cancelled) return
+        setPlan(got)
+        setData(mergeIntoEmpty(got))
+      } catch (e) { setError(e.message) }
+      setLoading(false)
+    }
+    init()
+    return () => { cancelled = true }
+  }, [planId, isNew, user.id])
+
+  // Permissions
+  const isOwner = plan && plan.created_by === user.id
+  const isSupervisor = user.role === 'supervisor'
+  const status = plan?.status || 'draft'
+  const readOnly = (() => {
+    if (!plan) return true
+    if (status === 'approved') return true
+    if (status === 'submitted') return !isSupervisor
+    return !isOwner && !isSupervisor // draft
+  })()
+
+  function mergeIntoEmpty(row) {
+    const out = { ...OPS_PLAN_EMPTY }
+    for (const k of Object.keys(OPS_PLAN_EMPTY)) {
+      if (row[k] !== undefined && row[k] !== null) out[k] = row[k]
+    }
+    // jsonb empty objects come back as {}
+    if (!out.media_contact_1 || typeof out.media_contact_1 !== 'object') out.media_contact_1 = { name: '', title: '', phone: '' }
+    if (!out.media_contact_2 || typeof out.media_contact_2 !== 'object') out.media_contact_2 = { name: '', title: '', phone: '' }
+    if (!Array.isArray(out.ci_uc_vehicles) || out.ci_uc_vehicles.length === 0) out.ci_uc_vehicles = [{ type: 'CI', vehicle_lp: '' }, { type: 'CI', vehicle_lp: '' }]
+    if (!Array.isArray(out.agent_ci_contacts) || out.agent_ci_contacts.length === 0) out.agent_ci_contacts = [{ type: 'CI', name: '', number: '' }, { type: 'CI', name: '', number: '' }]
+    return out
+  }
+
+  function scheduleSave() {
+    if (readOnly || !plan) return
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(doSave, 600)
+  }
+
+  async function doSave() {
+    if (readOnly || !plan) return
+    setSaving(true)
+    setError('')
+    try {
+      await callOpsApi({ action: 'update', id: plan.id, data: dataRef.current })
+      setSavedAt(new Date())
+    } catch (e) {
+      setError('Save failed: ' + e.message)
+    }
+    setSaving(false)
+  }
+
+  // Flush pending save on unmount
+  useEffect(() => () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+      // best-effort final save
+      if (plan && !readOnly) {
+        callOpsApi({ action: 'update', id: plan.id, data: dataRef.current }).catch(() => {})
+      }
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function update(key, value) {
+    setData(prev => ({ ...prev, [key]: value }))
+    scheduleSave()
+  }
+
+  function updateNested(key, idx, field, value) {
+    setData(prev => {
+      const list = [...(prev[key] || [])]
+      list[idx] = { ...list[idx], [field]: value }
+      return { ...prev, [key]: list }
+    })
+    scheduleSave()
+  }
+
+  function addNested(key, blank) {
+    setData(prev => ({ ...prev, [key]: [...(prev[key] || []), blank] }))
+    scheduleSave()
+  }
+
+  function removeNested(key, idx) {
+    setData(prev => ({ ...prev, [key]: (prev[key] || []).filter((_, i) => i !== idx) }))
+    scheduleSave()
+  }
+
+  function updateMedia(slot, field, value) {
+    setData(prev => ({ ...prev, [slot]: { ...(prev[slot] || {}), [field]: value } }))
+    scheduleSave()
+  }
+
+  async function handleSubmit() {
+    if (!plan) return
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); await doSave() }
+    if (!confirm('Submit this plan for review? You will not be able to edit it after submission.')) return
+    try {
+      const updated = await callOpsApi({ action: 'submit', id: plan.id })
+      setPlan(updated)
+      onSaved && onSaved()
+    } catch (e) { alert('Submit failed: ' + e.message) }
+  }
+
+  async function handleApprove() {
+    if (!supSig.trim() || !supRank.trim()) {
+      alert('Please type your signature and rank to approve.')
+      return
+    }
+    if (!confirm('Approve this plan? This action is final.')) return
+    try {
+      const updated = await callOpsApi({
+        action: 'approve', id: plan.id,
+        supervisor_signature: supSig.trim(),
+        supervisor_rank: supRank.trim(),
+      })
+      setPlan(updated)
+      onSaved && onSaved()
+    } catch (e) { alert('Approve failed: ' + e.message) }
+  }
+
+  if (loading || !plan) {
+    return (
+      <div>
+        <button style={btnSecondary} onClick={onBack}>← Back to List</button>
+        <p style={{ marginTop: 16, color: s.gray500 }}>{error || 'Loading…'}</p>
+      </div>
+    )
+  }
+
+  // ── Reusable input renderers (closures over readOnly + update) ──
+  const fld = (key, label_, opts = {}) => (
+    <div style={{ marginBottom: 12 }}>
+      <label style={label}>{label_}</label>
+      <input
+        type={opts.type || 'text'}
+        value={data[key] || ''}
+        onChange={e => update(key, e.target.value)}
+        disabled={readOnly}
+        placeholder={opts.placeholder || ''}
+        style={{ ...input, background: readOnly ? s.gray100 : s.white }}
+      />
+    </div>
+  )
+
+  const txtarea = (key, label_, rows = 4) => (
+    <div style={{ marginBottom: 12 }}>
+      <label style={label}>{label_}</label>
+      <textarea
+        value={data[key] || ''}
+        onChange={e => update(key, e.target.value)}
+        disabled={readOnly}
+        rows={rows}
+        style={{ ...input, fontFamily: s.font, resize: 'vertical', background: readOnly ? s.gray100 : s.white }}
+      />
+    </div>
+  )
+
+  const chk = (key, label_) => (
+    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: readOnly ? 'default' : 'pointer', fontSize: 14, color: s.gray700, marginRight: 16 }}>
+      <input type="checkbox" checked={!!data[key]} disabled={readOnly}
+        onChange={e => update(key, e.target.checked)} />
+      {label_}
+    </label>
+  )
+
+  const grid2 = { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }
+  const grid3 = { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }
+
+  const personRow = (key, idx, person, max) => (
+    <div key={idx} style={{
+      border: `1px solid ${s.gray200}`, borderRadius: s.radius,
+      padding: 12, marginBottom: 10, background: s.gray100,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <strong style={{ fontSize: 13, color: s.navy }}>
+          {key === 'suspects' ? `Suspect #${idx + 1}` : `Resident #${idx + 1}`}
+        </strong>
+        {!readOnly && (
+          <button onClick={() => removeNested(key, idx)}
+            style={{ ...btnSecondary, padding: '4px 10px', fontSize: 12, background: '#fee2e2', color: s.red }}>
+            Remove
+          </button>
+        )}
+      </div>
+      <div style={grid3}>
+        {OPS_SUSPECT_FIELDS.map(([f, lbl]) => (
+          <div key={f}>
+            <label style={label}>{lbl}</label>
+            <input
+              type="text"
+              value={person[f] || ''}
+              onChange={e => updateNested(key, idx, f, e.target.value)}
+              disabled={readOnly}
+              style={{ ...input, background: readOnly ? s.white : s.white }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+
+  return (
+    <div>
+      {/* ── Header bar ── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+        <button style={btnSecondary} onClick={onBack}>← Back to List</button>
+        <h2 style={{ margin: 0, fontSize: 20, color: s.navy, flex: 1 }}>
+          Jefferson County Operational Plan
+        </h2>
+        <StatusBadge status={status} />
+        <span style={{ fontSize: 12, color: s.gray500 }}>
+          {saving ? 'Saving…' : savedAt ? `Saved ${savedAt.toLocaleTimeString()}` : ''}
+        </span>
+      </div>
+
+      {error && <p style={{ color: s.red, marginBottom: 12 }}>{error}</p>}
+      {readOnly && (
+        <div style={{ ...card, background: '#fef9c3', borderLeft: `4px solid ${s.amber}`, padding: '12px 16px', marginBottom: 16 }}>
+          <strong style={{ color: s.navy }}>
+            {status === 'approved' ? 'This plan has been approved and is read-only.'
+              : status === 'submitted' && !isSupervisor ? 'This plan has been submitted and is awaiting supervisor review.'
+              : 'You do not have permission to edit this plan.'}
+          </strong>
+        </div>
+      )}
+
+      {/* ── CASE INFO ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Case Information</h3>
+        <div style={grid2}>
+          {fld('case_number', 'Case Number')}
+          {fld('deconfliction', 'Deconfliction')}
+          {fld('case_agent', 'Case Agent')}
+          {fld('operation_type', 'Type of Operation')}
+          {fld('city_county', 'City / County')}
+        </div>
+      </div>
+
+      {/* ── DATES ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Briefing & Operation Dates</h3>
+        <div style={grid2}>
+          {fld('briefing_datetime', 'Briefing Date / Time')}
+          {fld('operation_datetime', 'Operation Date / Time')}
+        </div>
+      </div>
+
+      {/* ── BACKGROUND ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Background Information</h3>
+        {txtarea('background_info', 'Background', 6)}
+      </div>
+
+      {/* ── SYNOPSIS ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Synopsis of Operation</h3>
+        {txtarea('synopsis', 'Synopsis', 8)}
+      </div>
+
+      {/* ── BRIEFING LOCATION ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Location of Briefing</h3>
+        {fld('briefing_address', 'Address')}
+        <div style={grid3}>
+          {fld('briefing_city_state', 'City / State')}
+          {fld('briefing_zip', 'Zip')}
+          {fld('briefing_other', 'Other')}
+        </div>
+      </div>
+
+      {/* ── OPERATION LOCATION ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Location of Operation</h3>
+        {fld('operation_address', 'Address')}
+        <div style={grid3}>
+          {fld('operation_city_state', 'City / State')}
+          {fld('operation_zip', 'Zip')}
+          {fld('operation_other', 'Other')}
+        </div>
+      </div>
+
+      {/* ── SUSPECTS ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Suspect Information</h3>
+        {(data.suspects || []).map((sus, i) => personRow('suspects', i, sus))}
+        {!readOnly && (data.suspects || []).length < 4 && (
+          <button style={btnSecondary} onClick={() => addNested('suspects', {})}>+ Add Suspect</button>
+        )}
+        {(data.suspects || []).length >= 4 && (
+          <p style={{ fontSize: 12, color: s.gray500, margin: 0 }}>Max 4 suspects.</p>
+        )}
+      </div>
+
+      {/* ── RESIDENTS ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Resident Information</h3>
+        {(data.residents || []).map((r, i) => personRow('residents', i, r))}
+        {!readOnly && (data.residents || []).length < 3 && (
+          <button style={btnSecondary} onClick={() => addNested('residents', {})}>+ Add Resident</button>
+        )}
+        {(data.residents || []).length >= 3 && (
+          <p style={{ fontSize: 12, color: s.gray500, margin: 0 }}>Max 3 residents.</p>
+        )}
+      </div>
+
+      {/* ── CI/UC VEHICLES ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>CI / UC Vehicle Information</h3>
+        {(data.ci_uc_vehicles || []).map((v, i) => (
+          <div key={i} style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 12, marginBottom: 10, alignItems: 'end' }}>
+            <div>
+              <label style={label}>Type #{i + 1}</label>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', height: 36 }}>
+                {['CI', 'UC'].map(opt => (
+                  <label key={opt} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 14, color: s.gray700, cursor: readOnly ? 'default' : 'pointer' }}>
+                    <input type="radio" name={`vehtype-${i}`} checked={v.type === opt} disabled={readOnly}
+                      onChange={() => updateNested('ci_uc_vehicles', i, 'type', opt)} />
+                    {opt}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label style={label}>Vehicle / License Plate</label>
+              <input type="text" value={v.vehicle_lp || ''} disabled={readOnly}
+                onChange={e => updateNested('ci_uc_vehicles', i, 'vehicle_lp', e.target.value)}
+                style={{ ...input, background: readOnly ? s.gray100 : s.white }} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── PERSONNEL ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Personnel</h3>
+        {(data.personnel || []).map((p, i) => (
+          <div key={i} style={{
+            border: `1px solid ${s.gray200}`, borderRadius: s.radius,
+            padding: 12, marginBottom: 10, background: s.gray100,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <strong style={{ fontSize: 13, color: s.navy }}>Personnel #{i + 1}</strong>
+              {!readOnly && (
+                <button onClick={() => removeNested('personnel', i)}
+                  style={{ ...btnSecondary, padding: '4px 10px', fontSize: 12, background: '#fee2e2', color: s.red }}>
+                  Remove
+                </button>
+              )}
+            </div>
+            <div style={grid3}>
+              {OPS_PERSONNEL_FIELDS.map(([f, lbl]) => (
+                <div key={f}>
+                  <label style={label}>{lbl}</label>
+                  <input type="text" value={p[f] || ''} disabled={readOnly}
+                    onChange={e => updateNested('personnel', i, f, e.target.value)}
+                    style={input} />
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        {!readOnly && (
+          <button style={btnSecondary} onClick={() => addNested('personnel', {})}>+ Add Row</button>
+        )}
+      </div>
+
+      {/* ── UC SIGNALS ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>UC Signals</h3>
+        <div style={grid3}>
+          {fld('uc_arrest_signal', 'Arrest Signal')}
+          {fld('uc_no_response', 'No Response')}
+          {fld('uc_full_response', 'Full Response')}
+        </div>
+        <div style={grid2}>
+          {fld('uc_audible', 'Audible')}
+          {fld('uc_visual', 'Visual')}
+        </div>
+      </div>
+
+      {/* ── COMMUNICATIONS ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Communications</h3>
+        <div style={{ marginBottom: 12 }}>
+          {chk('comms_radios', 'Radios')}
+          {chk('comms_cell_phones', 'Cell Phones')}
+        </div>
+        <div style={grid2}>
+          {fld('comms_channels', 'Radio Channels')}
+          {fld('comms_other', 'Other')}
+        </div>
+      </div>
+
+      {/* ── MONITORING ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Monitoring</h3>
+        <div style={{ marginBottom: 12 }}>
+          {chk('monitoring_callyo', 'Callyo')}
+          {chk('monitoring_1021', '10-21')}
+          {chk('monitoring_active', 'Active Monitoring')}
+        </div>
+        {data.monitoring_active && fld('monitoring_active_channel', 'Active Monitoring Channel')}
+      </div>
+
+      {/* ── AGENT/CI CONTACTS ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Agent / CI Contact Information</h3>
+        {(data.agent_ci_contacts || []).map((c, i) => (
+          <div key={i} style={{ display: 'grid', gridTemplateColumns: '160px 1fr 1fr', gap: 12, marginBottom: 10, alignItems: 'end' }}>
+            <div>
+              <label style={label}>Type #{i + 1}</label>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', height: 36 }}>
+                {['CI', 'UC'].map(opt => (
+                  <label key={opt} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 14, color: s.gray700, cursor: readOnly ? 'default' : 'pointer' }}>
+                    <input type="radio" name={`agtype-${i}`} checked={c.type === opt} disabled={readOnly}
+                      onChange={() => updateNested('agent_ci_contacts', i, 'type', opt)} />
+                    {opt}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label style={label}>Name</label>
+              <input type="text" value={c.name || ''} disabled={readOnly}
+                onChange={e => updateNested('agent_ci_contacts', i, 'name', e.target.value)}
+                style={{ ...input, background: readOnly ? s.gray100 : s.white }} />
+            </div>
+            <div>
+              <label style={label}>Number</label>
+              <input type="text" value={c.number || ''} disabled={readOnly}
+                onChange={e => updateNested('agent_ci_contacts', i, 'number', e.target.value)}
+                style={{ ...input, background: readOnly ? s.gray100 : s.white }} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── ARREST ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Arrest</h3>
+        <div style={{ marginBottom: 12 }}>
+          {chk('arrest_tbd', 'TBD')}
+          {chk('arrest_anticipated', 'Anticipated')}
+          {chk('arrest_not_anticipated', 'Not Anticipated')}
+        </div>
+        {data.arrest_anticipated && fld('arrest_charge', 'Anticipated Charge')}
+        {fld('arrest_other', 'Other')}
+      </div>
+
+      {/* ── MEDICAL ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Medical</h3>
+        {fld('medical_name', 'Hospital Name')}
+        {fld('medical_address', 'Address')}
+        <div style={grid3}>
+          {fld('medical_city_state', 'City / State')}
+          {fld('medical_zip', 'Zip')}
+          {fld('medical_phone', 'Phone')}
+        </div>
+      </div>
+
+      {/* ── DIVISION SUPERVISORS ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Division Supervisors</h3>
+        <div style={grid2}>
+          {fld('captain', 'Captain')}
+          {fld('lt_sergeant', 'Lt / Sergeant')}
+        </div>
+      </div>
+
+      {/* ── CONTACT NUMBERS ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Contact Numbers</h3>
+        {fld('contact_numbers', 'Contact Numbers')}
+      </div>
+
+      {/* ── MEDIA INQUIRIES ── */}
+      <div style={opsSection}>
+        <h3 style={opsSectionTitle}>Media Inquiries</h3>
+        {[1, 2].map(slot => {
+          const key = `media_contact_${slot}`
+          const m = data[key] || {}
+          return (
+            <div key={slot} style={{ marginBottom: slot === 1 ? 12 : 0 }}>
+              <strong style={{ fontSize: 13, color: s.navy, display: 'block', marginBottom: 8 }}>
+                Contact #{slot}
+              </strong>
+              <div style={grid3}>
+                <div>
+                  <label style={label}>Name</label>
+                  <input type="text" value={m.name || ''} disabled={readOnly}
+                    onChange={e => updateMedia(key, 'name', e.target.value)}
+                    style={{ ...input, background: readOnly ? s.gray100 : s.white }} />
+                </div>
+                <div>
+                  <label style={label}>Title</label>
+                  <input type="text" value={m.title || ''} disabled={readOnly}
+                    onChange={e => updateMedia(key, 'title', e.target.value)}
+                    style={{ ...input, background: readOnly ? s.gray100 : s.white }} />
+                </div>
+                <div>
+                  <label style={label}>Phone</label>
+                  <input type="text" value={m.phone || ''} disabled={readOnly}
+                    onChange={e => updateMedia(key, 'phone', e.target.value)}
+                    style={{ ...input, background: readOnly ? s.gray100 : s.white }} />
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* ── SUPERVISOR APPROVAL (supervisor only, on submitted) ── */}
+      {isSupervisor && status === 'submitted' && (
+        <div style={{ ...opsSection, borderLeft: `4px solid ${s.amber}` }}>
+          <h3 style={opsSectionTitle}>Supervisor Approval</h3>
+          <div style={grid2}>
+            <div>
+              <label style={label}>Type your signature</label>
+              <input type="text" value={supSig} onChange={e => setSupSig(e.target.value)}
+                placeholder="Type your full name" style={input} />
+              {supSig && (
+                <div style={{
+                  marginTop: 6, padding: '6px 10px',
+                  border: `1px solid ${s.gray200}`, borderRadius: s.radius, background: s.gray100,
+                }}>
+                  <span style={CURSIVE_STYLE}>{supSig}</span>
+                </div>
+              )}
+            </div>
+            <div>
+              <label style={label}>Rank</label>
+              <input type="text" value={supRank} onChange={e => setSupRank(e.target.value)}
+                placeholder="e.g., Captain, Lieutenant" style={input} />
+            </div>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <button style={btnPrimary} onClick={handleApprove}>Approve Plan</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Approved info banner ── */}
+      {status === 'approved' && plan.supervisor_signature && (
+        <div style={{ ...opsSection, background: '#dcfce7' }}>
+          <h3 style={opsSectionTitle}>Approval Record</h3>
+          <p style={{ margin: '4px 0', fontSize: 14 }}>
+            <strong>Approved by:</strong> {plan.supervisor_signature}
+            {plan.supervisor_rank && <> ({plan.supervisor_rank})</>}
+          </p>
+          {plan.supervisor_signed_at && (
+            <p style={{ margin: '4px 0', fontSize: 14 }}>
+              <strong>On:</strong> {new Date(plan.supervisor_signed_at).toLocaleString()}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* ── Footer actions ── */}
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', marginTop: 20, flexWrap: 'wrap' }}>
+        <button style={btnSecondary} onClick={onBack}>← Back to List</button>
+        {!readOnly && status === 'draft' && (
+          <button style={btnPrimary} onClick={handleSubmit}>Submit for Review</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function OpsPlansView({ user }) {
+  const [view, setView] = useState('list')
+  const [activeId, setActiveId] = useState(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  if (view === 'form') {
+    return (
+      <OpsPlanForm
+        key={activeId || 'new'}
+        user={user}
+        planId={activeId}
+        onBack={() => { setView('list'); setActiveId(null); setRefreshKey(k => k + 1) }}
+        onSaved={() => setRefreshKey(k => k + 1)}
+      />
+    )
+  }
+  return (
+    <OpsPlansList
+      key={refreshKey}
+      user={user}
+      onOpen={id => { setActiveId(id); setView('form') }}
+      onNew={() => { setActiveId(null); setView('form') }}
+    />
   )
 }
 
