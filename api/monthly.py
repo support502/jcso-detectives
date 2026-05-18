@@ -4,7 +4,7 @@ Accepts POST JSON with month, year, and all entries for that month.
 Opens the monthly Excel template, fills the correct month sheet, returns .xlsx.
 """
 from http.server import BaseHTTPRequestHandler
-import json, os, io, datetime, calendar, traceback
+import json, os, io, datetime, traceback
 from openpyxl import load_workbook
 
 
@@ -43,15 +43,33 @@ def _compute_target_month(selected_month, year):
 
 
 def _fetch_month_entries(year, month):
-    """Pull det_entries for a single month. ~286 rows max, well under the
-    Supabase default page size, so no pagination needed."""
+    """Pull det_entries for every week that overlaps `month`.
+
+    Work weeks (Sun..Sat) don't align with calendar months. A strict
+    entry_date BETWEEN 1st AND last filter loses the prior-month days of
+    any leading partial-overlap week — e.g. an Apr 27 (Mon) entry whose
+    week_start is Sun Apr 26 would be missing from May's page even though
+    its week is the first week of May on the paper form.
+
+    Fixing it by `week_start IN <month's overlapping Sundays>` is exact:
+    every det_entries row already carries its week's anchor Sunday, so
+    pulling by that anchor yields the entire week's data, regardless of
+    which calendar month each day lands in. The trailing-edge case (week
+    starts in this month, runs into the next) is already handled because
+    such a week's week_start is in `get_week_starts_for_month(month, year)`.
+
+    Cross-month duplication is expected: an Apr 27 entry will appear on
+    both April's and May's pages, matching how the paper form works.
+
+    ~455 rows max for a 5-week span × 13 detectives × 7 days, well under
+    the Supabase default page size.
+    """
+    week_starts = get_week_starts_for_month(month, year)
+    if not week_starts:
+        return []
     sb = get_supabase()
-    last_day = calendar.monthrange(year, month)[1]
-    start = datetime.date(year, month, 1).isoformat()
-    end = datetime.date(year, month, last_day).isoformat()
     resp = sb.table('det_entries').select('*') \
-        .gte('entry_date', start) \
-        .lte('entry_date', end) \
+        .in_('week_start', week_starts) \
         .execute()
     return resp.data or []
 
