@@ -1666,31 +1666,60 @@ const UNIT_ROSTER = {
   UC: ['Colton Lowe', 'Layne Verdine', 'Ryan Golmon', 'Matthew Flowers', 'Tyler Lewis'],
 }
 
-// Compute up to 5 week-start Sundays that overlap a given month
-function getWeekStartsForMonth(month, year) {
-  const first = new Date(year, month - 1, 1)
-  // Sunday on or before the 1st
-  const offset = first.getDay() // 0=Sun
-  const start = new Date(first)
-  start.setDate(start.getDate() - offset)
+// Per-week info for the supervisor completion grid.
+// Returns [{ ws, expected }] for each Sun..Sat window that contains at least
+// one weekday (Mon-Fri) falling in the displayed month.
+//   - `ws`        : Sunday's ISO date string
+//   - `expected`  : count of Mon-Fri days within the month and ≤ today
+//                   (a future weekday isn't yet "due", so it doesn't count
+//                   against completion)
+// Weeks with zero in-month weekdays are dropped, so months that span 4
+// calendar weeks (or 4 + a partial week with weekend-only overlap) don't
+// show a phantom 5th column.
+function getMonthWeekInfo(month, year, today = new Date()) {
+  const t = new Date(today)
+  t.setHours(0, 0, 0, 0)
 
-  const lastDay = new Date(year, month, 0) // last day of month
+  const first = new Date(year, month - 1, 1)
+  const start = new Date(first)
+  start.setDate(start.getDate() - start.getDay()) // back up to Sunday
+
   const weeks = []
   const cur = new Date(start)
-  while (weeks.length < 6) {
-    const weekEnd = new Date(cur)
-    weekEnd.setDate(weekEnd.getDate() + 6)
-    if ((cur.getMonth() + 1 === month && cur.getFullYear() === year) ||
-        (weekEnd.getMonth() + 1 === month && weekEnd.getFullYear() === year)) {
-      weeks.push(cur.toISOString().split('T')[0])
+  // A month can touch at most 6 Sun..Sat windows.
+  for (let i = 0; i < 6; i++) {
+    let weekdaysInMonth = 0
+    let expected = 0
+    for (let d = 0; d < 7; d++) {
+      const day = new Date(cur)
+      day.setDate(day.getDate() + d)
+      const dow = day.getDay() // 0=Sun..6=Sat
+      const inMonth =
+        day.getMonth() + 1 === month && day.getFullYear() === year
+      const isWeekday = dow >= 1 && dow <= 5
+      if (isWeekday && inMonth) {
+        weekdaysInMonth++
+        if (day <= t) expected++
+      }
+    }
+    if (weekdaysInMonth > 0) {
+      weeks.push({ ws: cur.toISOString().split('T')[0], expected })
+    } else if (weeks.length > 0) {
+      break // past the end of the month
     }
     cur.setDate(cur.getDate() + 7)
-    if (cur > new Date(lastDay.getTime() + 7 * 86400000)) break
   }
-  return weeks.slice(0, 5)
+  return weeks
 }
 
-function SubmissionGrid({ title, names, weekStarts, entryMap }) {
+// Back-compat shim: callers that only need the Sunday strings.
+function getWeekStartsForMonth(month, year) {
+  return getMonthWeekInfo(month, year).map(w => w.ws)
+}
+
+function SubmissionGrid({ title, names, weekInfos, entryMap }) {
+  // weekInfos: [{ ws, expected }] — `expected` is the number of weekdays
+  // that have already occurred within the displayed month for this week.
   return (
     <div style={card}>
       <h3 style={{ margin: '0 0 16px', color: s.navy, fontSize: 16 }}>{title}</h3>
@@ -1699,7 +1728,7 @@ function SubmissionGrid({ title, names, weekStarts, entryMap }) {
           <thead>
             <tr>
               <th style={{ ...th, minWidth: 140 }}>Detective</th>
-              {weekStarts.map((_, i) => (
+              {weekInfos.map((_, i) => (
                 <th key={i} style={{ ...th, textAlign: 'center', minWidth: 70 }}>Wk {i + 1}</th>
               ))}
             </tr>
@@ -1708,15 +1737,23 @@ function SubmissionGrid({ title, names, weekStarts, entryMap }) {
             {names.map((name, ri) => (
               <tr key={name} style={{ background: ri % 2 === 0 ? s.white : s.gray100 }}>
                 <td style={{ ...td, fontWeight: 600, color: s.navy }}>{name}</td>
-                {weekStarts.map((ws, wi) => {
+                {weekInfos.map(({ ws, expected }, wi) => {
                   const count = entryMap.get(`${name}::${ws}`) || 0
+                  let mark
+                  if (expected === 0) {
+                    // No weekdays of this week have occurred in-month yet —
+                    // nothing to be incomplete about.
+                    mark = <span style={{ color: s.gray300 }}>—</span>
+                  } else if (count >= expected) {
+                    mark = <span style={{ color: s.green }}>&#10003;</span>
+                  } else if (count > 0) {
+                    mark = <span style={{ color: '#F59E0B' }}>◐</span>
+                  } else {
+                    mark = <span style={{ color: s.gray300 }}>—</span>
+                  }
                   return (
                     <td key={wi} style={{ ...td, textAlign: 'center', fontSize: 18 }}>
-                      {count >= 5
-                        ? <span style={{ color: s.green }}>&#10003;</span>
-                        : count > 0
-                          ? <span style={{ color: '#F59E0B' }}>◐</span>
-                          : <span style={{ color: s.gray300 }}>—</span>}
+                      {mark}
                     </td>
                   )
                 })}
@@ -1743,23 +1780,26 @@ function Dashboard() {
     })
   }, [month, year])
 
-  const weekStarts = useMemo(() => getWeekStartsForMonth(month, year), [month, year])
+  const weekInfos = useMemo(() => getMonthWeekInfo(month, year), [month, year])
 
-  // Build a Map of "detective_name::week_start" → count of Mon–Fri entries
+  // Build a Map of "detective_name::week_start" → count of in-month Mon-Fri
+  // entries. Entries whose week_start belongs to the displayed month are
+  // counted; weekend entries and any entry whose week_start isn't displayed
+  // are skipped.
   const entryMap = useMemo(() => {
+    const wsSet = new Set(weekInfos.map(w => w.ws))
     const map = new Map()
     for (const e of entries) {
       const ws = e.week_start || getWeekStart(e.entry_date)
-      if (!weekStarts.includes(ws)) continue
-      // Only count weekday entries (Mon=1 .. Fri=5)
+      if (!wsSet.has(ws)) continue
       const d = new Date(e.entry_date + 'T00:00:00')
-      const day = d.getDay() // 0=Sun, 6=Sat
+      const day = d.getDay()
       if (day === 0 || day === 6) continue
       const key = `${e.user_name}::${ws}`
       map.set(key, (map.get(key) || 0) + 1)
     }
     return map
-  }, [entries, weekStarts])
+  }, [entries, weekInfos])
 
   return (
     <div>
@@ -1781,9 +1821,9 @@ function Dashboard() {
         <p style={{ color: s.gray500, padding: 12 }}>Loading...</p>
       ) : (
         <>
-          <SubmissionGrid title="Uniform Detectives" names={UNIT_ROSTER.Uniform} weekStarts={weekStarts} entryMap={entryMap} />
-          <SubmissionGrid title="Interdiction" names={UNIT_ROSTER.Interdiction} weekStarts={weekStarts} entryMap={entryMap} />
-          <SubmissionGrid title="Undercover Detectives" names={UNIT_ROSTER.UC} weekStarts={weekStarts} entryMap={entryMap} />
+          <SubmissionGrid title="Uniform Detectives" names={UNIT_ROSTER.Uniform} weekInfos={weekInfos} entryMap={entryMap} />
+          <SubmissionGrid title="Interdiction" names={UNIT_ROSTER.Interdiction} weekInfos={weekInfos} entryMap={entryMap} />
+          <SubmissionGrid title="Undercover Detectives" names={UNIT_ROSTER.UC} weekInfos={weekInfos} entryMap={entryMap} />
         </>
       )}
 
@@ -2088,28 +2128,6 @@ function MonthlyReport() {
       alert('Export failed: ' + err.message)
     }
     setBusy(null)
-  }
-
-  // Compute week-start Sundays that overlap a given month
-  function getWeekStartsForMonth(m, y) {
-    const first = new Date(y, m - 1, 1)
-    const start = new Date(first)
-    start.setDate(start.getDate() - start.getDay()) // Sunday on or before the 1st
-    const lastDay = new Date(m < 12 ? new Date(y, m, 1) : new Date(y + 1, 0, 1))
-    lastDay.setDate(lastDay.getDate() - 1)
-    const weeks = []
-    const cur = new Date(start)
-    while (weeks.length < 6) {
-      const weekEnd = new Date(cur)
-      weekEnd.setDate(weekEnd.getDate() + 6)
-      if ((cur.getMonth() + 1 === m && cur.getFullYear() === y) ||
-          (weekEnd.getMonth() + 1 === m && weekEnd.getFullYear() === y)) {
-        weeks.push(cur.toISOString().split('T')[0])
-      }
-      cur.setDate(cur.getDate() + 7)
-      if (cur > new Date(lastDay.getTime() + 7 * 86400000)) break
-    }
-    return weeks.slice(0, 5)
   }
 
   async function exportWeeklies(unit) {

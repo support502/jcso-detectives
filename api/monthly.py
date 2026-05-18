@@ -4,8 +4,56 @@ Accepts POST JSON with month, year, and all entries for that month.
 Opens the monthly Excel template, fills the correct month sheet, returns .xlsx.
 """
 from http.server import BaseHTTPRequestHandler
-import json, os, io, datetime
+import json, os, io, datetime, calendar, traceback
 from openpyxl import load_workbook
+
+
+# ── Supabase client (lazy-init) ─────────────────────────────────────────────
+_supabase = None
+
+
+def get_supabase():
+    global _supabase
+    if _supabase is None:
+        from supabase import create_client
+        url = os.environ.get('SUPABASE_URL')
+        key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+        if not url or not key:
+            raise RuntimeError(
+                'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars. '
+                'Set them in Vercel project settings.'
+            )
+        _supabase = create_client(url, key)
+    return _supabase
+
+
+def _compute_target_month(selected_month, year):
+    """Upper bound for the month-loop in a monthly export.
+
+    - Past year   → 12 (full year, the data is settled)
+    - Current year → max(selected, today.month) (whichever is later)
+    - Future year → just the selected month
+    """
+    today = datetime.date.today()
+    if year < today.year:
+        return 12
+    if year > today.year:
+        return selected_month
+    return max(selected_month, today.month)
+
+
+def _fetch_month_entries(year, month):
+    """Pull det_entries for a single month. ~286 rows max, well under the
+    Supabase default page size, so no pagination needed."""
+    sb = get_supabase()
+    last_day = calendar.monthrange(year, month)[1]
+    start = datetime.date(year, month, 1).isoformat()
+    end = datetime.date(year, month, last_day).isoformat()
+    resp = sb.table('det_entries').select('*') \
+        .gte('entry_date', start) \
+        .lte('entry_date', end) \
+        .execute()
+    return resp.data or []
 
 UNIFORM_TEMPLATE_PATH = os.path.join(
     os.path.dirname(__file__), '..', 'templates', 'Monthly Uniform 2025 new.xlsx'
@@ -335,12 +383,23 @@ def _write_uniform_year_total(wb, month, inter_month, uni_month, drug_month):
             yt[f'{mc}{yt_row}'] = val
 
 
-def fill_monthly(month, year, entries):
-    """Fill a single month sheet + its Year Total column. Returns BytesIO."""
+def fill_monthly(selected_month, year):
+    """Fill Jan..target month sheets + Year Total in the Uniform template.
+
+    target = max(selected_month, today.month) for the current year, 12 for
+    past years, selected_month for future years. Months with no data are
+    skipped, so the workbook reflects exactly what's in Supabase up to that
+    bound. Returns BytesIO."""
     wb = load_workbook(UNIFORM_TEMPLATE_PATH)
-    inter_month, uni_month, drug_month = _fill_uniform_month_sheet(
-        wb, month, year, entries)
-    _write_uniform_year_total(wb, month, inter_month, uni_month, drug_month)
+    target = _compute_target_month(selected_month, year)
+
+    for m in range(1, target + 1):
+        month_entries = _fetch_month_entries(year, m)
+        if not month_entries:
+            continue
+        inter_m, uni_m, drug_m = _fill_uniform_month_sheet(
+            wb, m, year, month_entries)
+        _write_uniform_year_total(wb, m, inter_m, uni_m, drug_m)
 
     output = io.BytesIO()
     wb.save(output)
@@ -445,10 +504,18 @@ def _write_uc_year_total(wb, month, uc_stat_month, uc_drug_month):
             yt[f'{mc}{yt_row}'] = val
 
 
-def fill_monthly_uc(month, year, entries):
-    """Fill a single month sheet (UC). Year Total has cross-sheet refs — don't touch it."""
+def fill_monthly_uc(selected_month, year):
+    """Fill Jan..target month sheets in the UC template. UC's Year Total
+    uses cross-sheet formulas, so it auto-recalculates from the month sheets
+    when Excel opens the file — we don't write to it directly."""
     wb = load_workbook(UC_TEMPLATE_PATH)
-    _fill_uc_month_sheet(wb, month, year, entries)
+    target = _compute_target_month(selected_month, year)
+
+    for m in range(1, target + 1):
+        month_entries = _fetch_month_entries(year, m)
+        if not month_entries:
+            continue
+        _fill_uc_month_sheet(wb, m, year, month_entries)
 
     output = io.BytesIO()
     wb.save(output)
@@ -502,11 +569,13 @@ class handler(BaseHTTPRequestHandler):
                 filename = f'JCSO_Yearly_{unit}_{year}.xlsx'
             else:
                 month = int(body['month'])
-                entries = body.get('entries', [])
+                # `entries` may be present in the payload from older clients
+                # — ignore it; we fetch from Supabase ourselves so the export
+                # spans Jan..target_month, not just the selected month.
                 if unit == 'UC':
-                    output = fill_monthly_uc(month, year, entries)
+                    output = fill_monthly_uc(month, year)
                 else:
-                    output = fill_monthly(month, year, entries)
+                    output = fill_monthly(month, year)
                 filename = f'JCSO_Monthly_{unit}_{month_names[month]}_{year}.xlsx'
 
             self.send_response(200)
@@ -518,11 +587,13 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(output.read())
 
         except Exception as exc:
+            tb = traceback.format_exc()
+            print(f'[monthly] ERROR: {tb}')
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'error': str(exc)}).encode())
+            self.wfile.write(json.dumps({'error': str(exc), 'traceback': tb}).encode())
 
     def do_OPTIONS(self):
         self.send_response(200)
