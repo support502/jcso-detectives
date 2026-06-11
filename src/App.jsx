@@ -2296,6 +2296,12 @@ function findCurrentPayPeriod() {
   return PAY_PERIODS[0]?.start || ''
 }
 
+// Pay period (from PAY_PERIODS) that a YYYY-MM-DD date falls into, or null if out of range.
+function payPeriodForDate(dateStr) {
+  if (!dateStr) return null
+  return PAY_PERIODS.find(p => dateStr >= p.start && dateStr <= p.end) || null
+}
+
 function normalizeTimesheetGrid(rows) {
   // Collect all unique codes across all days, in order of first appearance
   const allCodes = []
@@ -2977,6 +2983,10 @@ function ApprovedRequestsView({ user }) {  // eslint-disable-line no-unused-vars
   const [feedback, setFeedback] = useState('')
   const [processing, setProcessing] = useState(false)
   const [mergeStatus, setMergeStatus] = useState('')
+  const [busyPeriod, setBusyPeriod] = useState('')           // pay-period start currently running an op
+  const [expandedPeriods, setExpandedPeriods] = useState(() => new Set([findCurrentPayPeriod()]))
+
+  const rowKey = (r) => `${r._type}-${r.id}`
 
   useEffect(() => { loadApproved() }, [])
 
@@ -3003,31 +3013,43 @@ function ApprovedRequestsView({ user }) {  // eslint-disable-line no-unused-vars
     })
   }
 
-  function toggleAll() {
-    const allKeys = requests.map(r => `${r._type}-${r.id}`)
-    if (selectedKeys.size === allKeys.length) {
-      setSelectedKeys(new Set())
-    } else {
-      setSelectedKeys(new Set(allKeys))
-    }
+  // Select/deselect every slip within a single pay period (leaves other periods untouched).
+  function toggleAllInPeriod(rows) {
+    const keys = rows.map(rowKey)
+    const allSel = keys.length > 0 && keys.every(k => selectedKeys.has(k))
+    setSelectedKeys(prev => {
+      const next = new Set(prev)
+      if (allSel) keys.forEach(k => next.delete(k))
+      else keys.forEach(k => next.add(k))
+      return next
+    })
   }
 
-  async function handleArchiveSelected() {
-    if (selectedKeys.size === 0) return
-    const count = selectedKeys.size
+  function toggleExpand(start) {
+    setExpandedPeriods(prev => {
+      const next = new Set(prev)
+      if (next.has(start)) next.delete(start); else next.add(start)
+      return next
+    })
+  }
+
+  // Archive only the selected slips within one pay period.
+  async function handleArchivePeriod(rows, periodStart) {
+    const selRows = rows.filter(r => selectedKeys.has(rowKey(r)))
+    if (selRows.length === 0) return
+    const count = selRows.length
     if (!confirm(`Archive ${count} request${count !== 1 ? 's' : ''}? They will be removed from this view but kept in the database.`)) return
     setProcessing(true)
+    setBusyPeriod(periodStart)
     try {
-      const items = [...selectedKeys].map(key => {
-        const [type, ...rest] = key.split('-')
-        return { type, id: rest.join('-') }
-      })
+      const items = selRows.map(r => ({ type: r._type, id: r.id }))
       await archiveRequests(items)
       showFeedback(`Archived ${count} request${count !== 1 ? 's' : ''}`)
       loadApproved()
     } catch (e) {
       alert('Failed to archive: ' + (e.message || 'Unknown error'))
     }
+    setBusyPeriod('')
     setProcessing(false)
   }
 
@@ -3081,12 +3103,14 @@ function ApprovedRequestsView({ user }) {  // eslint-disable-line no-unused-vars
     }
   }
 
-  async function handleMergeExport() {
-    if (selectedKeys.size === 0) return
+  // Merge & export only the selected slips within one pay period into one combined PDF.
+  async function handleMergePeriod(rows, periodStart) {
     // Use list order, not selection order
-    const selectedRows = requests.filter(r => selectedKeys.has(`${r._type}-${r.id}`))
+    const selectedRows = rows.filter(r => selectedKeys.has(rowKey(r)))
+    if (selectedRows.length === 0) return
     const total = selectedRows.length
     setProcessing(true)
+    setBusyPeriod(periodStart)
     setMergeStatus(total >= 10 ? `Merging 0 of ${total}…` : '')
     try {
       const { skipped } = await mergeRequestsPdf(
@@ -3104,11 +3128,177 @@ function ApprovedRequestsView({ user }) {  // eslint-disable-line no-unused-vars
       alert('Merge failed: ' + (e.message || 'Unknown error'))
     }
     setMergeStatus('')
+    setBusyPeriod('')
     setProcessing(false)
   }
 
-  const allKeys = requests.map(r => `${r._type}-${r.id}`)
-  const allSelected = allKeys.length > 0 && selectedKeys.size === allKeys.length
+  // ── Group approved slips into biweekly pay periods (Jan 4 2026 anchor, via PAY_PERIODS) ──
+  const currentStart = findCurrentPayPeriod()
+  const groupMap = new Map()   // period.start -> { period, rows }
+  const undated = []
+  for (const r of requests) {
+    const d = r._type === 'timeoff'
+      ? (r.dates_picked || []).filter(Boolean).sort()[0]
+      : r.date_worked
+    const pp = payPeriodForDate(d)
+    if (!pp) { undated.push(r); continue }
+    if (!groupMap.has(pp.start)) groupMap.set(pp.start, { period: pp, rows: [] })
+    groupMap.get(pp.start).rows.push(r)
+  }
+  const currentGroup = groupMap.get(currentStart)
+  const otherGroups = [...groupMap.values()]
+    .filter(g => g.period.start !== currentStart)
+    .sort((a, b) => b.period.start.localeCompare(a.period.start))   // newest first
+
+  // ── Per-slip card (shared by every pay-period section) ──
+  function renderRow(row) {
+    const isTO = row._type === 'timeoff'
+    const key = rowKey(row)
+    const isSelected = selectedKeys.has(key)
+    return (
+      <div key={key} style={{
+        ...card, marginBottom: 0,
+        border: isSelected ? `2px solid ${s.amber}` : '2px solid transparent',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={() => toggleRow(key)}
+            style={{ marginTop: 3, flexShrink: 0, cursor: 'pointer' }}
+          />
+
+          <div style={{ fontWeight: 700, fontSize: 15, color: s.navy, minWidth: 140 }}>
+            {row.submitter?.name || 'Unknown'}
+          </div>
+
+          <span style={{
+            background: isTO ? '#dbeafe' : '#ede9fe',
+            color: isTO ? '#1e40af' : '#5b21b6',
+            padding: '2px 8px', borderRadius: 4,
+            fontSize: 11, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap',
+          }}>
+            {isTO ? 'Time Off' : 'Overtime'}
+          </span>
+
+          <div style={{ flex: 1, minWidth: 160 }}>
+            {isTO ? (
+              <div style={{ fontSize: 14, color: s.gray900 }}>
+                <strong>{row.type}</strong>
+                {row.type === 'Other' && row.other_code ? ` — ${row.other_code}` : ''}
+                {' · '}
+                <strong>{row.hours}</strong> {row.hours === 1 ? 'hr' : 'hrs'}
+                {row.dates_picked?.length > 0
+                  ? ` · ${fmtShortDate(row.dates_picked[0])}${row.dates_picked.length > 1 ? ` +${row.dates_picked.length - 1}` : ''}`
+                  : ''}
+                {row.dates_notes ? <span style={{ color: s.gray500 }}> · {row.dates_notes}</span> : ''}
+              </div>
+            ) : (
+              <div style={{ fontSize: 14, color: s.gray900 }}>
+                <strong>{fmtShortDate(row.date_worked)}</strong>
+                {' · '}
+                <strong>{row.hours_worked}</strong> {row.hours_worked === 1 ? 'hr' : 'hrs'}
+                {row.purpose
+                  ? <span style={{ color: s.gray500 }}> · {row.purpose.length > 50 ? row.purpose.slice(0, 50) + '…' : row.purpose}</span>
+                  : ''}
+                {row.payment_or_comp
+                  ? <span style={{ color: s.gray500 }}> · {row.payment_or_comp}</span>
+                  : ''}
+                {row.grade
+                  ? <span style={{ color: s.gray500 }}> · Grade: {row.grade}</span>
+                  : ''}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: s.gray500, marginTop: 3 }}>
+              Submitted {fmtDateTime(row.created_at)}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+            <button onClick={() => handleExportPdf(row)}
+              style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
+              Export PDF
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── One pay-period accordion section, with its own Select All / Archive / Merge & Export ──
+  function renderPeriodSection(group, isCurrent) {
+    const { period, rows } = group
+    const start = period.start
+    const isOpen = expandedPeriods.has(start)
+    const selCount = rows.filter(r => selectedKeys.has(rowKey(r))).length
+    const allSel = rows.length > 0 && selCount === rows.length
+    const busy = busyPeriod === start
+    return (
+      <div key={start} style={{ ...card, marginBottom: 12, padding: 0, overflow: 'hidden' }}>
+        <div
+          onClick={() => toggleExpand(start)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: '13px 18px', cursor: 'pointer',
+            background: isCurrent ? s.navy : s.gray100,
+            color: isCurrent ? s.white : s.navy,
+            borderBottom: isOpen ? `1px solid ${s.gray200}` : 'none',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontSize: 12, transition: 'transform 0.15s', transform: isOpen ? 'rotate(90deg)' : 'none' }}>▶</span>
+          <span style={{ fontWeight: 700, fontSize: 15 }}>
+            {isCurrent ? `Current Pay Period: ${period.label}` : period.label}
+          </span>
+          <span style={{ fontSize: 13, fontWeight: 600, opacity: 0.8 }}>
+            ({rows.length} slip{rows.length !== 1 ? 's' : ''})
+          </span>
+        </div>
+
+        {isOpen && (
+          <div style={{ padding: 16 }}>
+            {/* Per-period bulk action bar */}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: s.gray700, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={allSel}
+                  onChange={() => toggleAllInPeriod(rows)}
+                  style={{ cursor: 'pointer' }}
+                />
+                Select All
+              </label>
+              <button
+                onClick={() => handleArchivePeriod(rows, start)}
+                disabled={selCount === 0 || processing}
+                style={{
+                  ...btnSecondary, padding: '5px 14px', fontSize: 13,
+                  opacity: (selCount === 0 || processing) ? 0.4 : 1,
+                  cursor: (selCount === 0 || processing) ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {busy && processing && !mergeStatus ? 'Archiving…' : selCount > 0 ? `Archive ${selCount} request${selCount !== 1 ? 's' : ''}` : 'Archive Selected'}
+              </button>
+              <button
+                onClick={() => handleMergePeriod(rows, start)}
+                disabled={selCount === 0 || processing}
+                style={{
+                  ...btnPrimary, padding: '5px 14px', fontSize: 13,
+                  opacity: (selCount === 0 || processing) ? 0.4 : 1,
+                  cursor: (selCount === 0 || processing) ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {busy && mergeStatus ? mergeStatus : selCount > 0 ? `Merge & Export (${selCount})` : 'Merge & Export'}
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {rows.map(renderRow)}
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <>
@@ -3124,119 +3314,20 @@ function ApprovedRequestsView({ user }) {  // eslint-disable-line no-unused-vars
         <div style={{ ...card, textAlign: 'center', color: s.gray500, padding: 40 }}>
           No approved requests.
         </div>
+      ) : (!currentGroup && otherGroups.length === 0 && undated.length === 0) ? (
+        <div style={{ ...card, textAlign: 'center', color: s.gray500, padding: 40 }}>
+          No approved requests.
+        </div>
       ) : (
         <>
-          {/* Bulk action bar */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: s.gray700, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={toggleAll}
-                style={{ cursor: 'pointer' }}
-              />
-              Select All
-            </label>
-            <button
-              onClick={handleArchiveSelected}
-              disabled={selectedKeys.size === 0 || processing}
-              style={{
-                ...btnSecondary, padding: '5px 14px', fontSize: 13,
-                opacity: (selectedKeys.size === 0 || processing) ? 0.4 : 1,
-                cursor: (selectedKeys.size === 0 || processing) ? 'not-allowed' : 'pointer',
-              }}
-            >
-              {processing && !mergeStatus ? 'Archiving…' : selectedKeys.size > 0 ? `Archive ${selectedKeys.size} request${selectedKeys.size !== 1 ? 's' : ''}` : 'Archive Selected'}
-            </button>
-            <button
-              onClick={handleMergeExport}
-              disabled={selectedKeys.size === 0 || processing}
-              style={{
-                ...btnPrimary, padding: '5px 14px', fontSize: 13,
-                opacity: (selectedKeys.size === 0 || processing) ? 0.4 : 1,
-                cursor: (selectedKeys.size === 0 || processing) ? 'not-allowed' : 'pointer',
-              }}
-            >
-              {mergeStatus || (selectedKeys.size > 0 ? `Merge & Export (${selectedKeys.size})` : 'Merge & Export')}
-            </button>
-          </div>
+          {/* Current pay period — top, expanded by default (hidden if it has no slips) */}
+          {currentGroup && renderPeriodSection(currentGroup, true)}
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {requests.map(row => {
-              const isTO = row._type === 'timeoff'
-              const rowKey = `${row._type}-${row.id}`
-              const isSelected = selectedKeys.has(rowKey)
+          {/* Previous/other pay periods — collapsed accordions, newest first */}
+          {otherGroups.map(g => renderPeriodSection(g, false))}
 
-              return (
-                <div key={rowKey} style={{
-                  ...card, marginBottom: 0,
-                  border: isSelected ? `2px solid ${s.amber}` : '2px solid transparent',
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleRow(rowKey)}
-                      style={{ marginTop: 3, flexShrink: 0, cursor: 'pointer' }}
-                    />
-
-                    <div style={{ fontWeight: 700, fontSize: 15, color: s.navy, minWidth: 140 }}>
-                      {row.submitter?.name || 'Unknown'}
-                    </div>
-
-                    <span style={{
-                      background: isTO ? '#dbeafe' : '#ede9fe',
-                      color: isTO ? '#1e40af' : '#5b21b6',
-                      padding: '2px 8px', borderRadius: 4,
-                      fontSize: 11, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap',
-                    }}>
-                      {isTO ? 'Time Off' : 'Overtime'}
-                    </span>
-
-                    <div style={{ flex: 1, minWidth: 160 }}>
-                      {isTO ? (
-                        <div style={{ fontSize: 14, color: s.gray900 }}>
-                          <strong>{row.type}</strong>
-                          {row.type === 'Other' && row.other_code ? ` — ${row.other_code}` : ''}
-                          {' · '}
-                          <strong>{row.hours}</strong> {row.hours === 1 ? 'hr' : 'hrs'}
-                          {row.dates_picked?.length > 0
-                            ? ` · ${fmtShortDate(row.dates_picked[0])}${row.dates_picked.length > 1 ? ` +${row.dates_picked.length - 1}` : ''}`
-                            : ''}
-                          {row.dates_notes ? <span style={{ color: s.gray500 }}> · {row.dates_notes}</span> : ''}
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: 14, color: s.gray900 }}>
-                          <strong>{fmtShortDate(row.date_worked)}</strong>
-                          {' · '}
-                          <strong>{row.hours_worked}</strong> {row.hours_worked === 1 ? 'hr' : 'hrs'}
-                          {row.purpose
-                            ? <span style={{ color: s.gray500 }}> · {row.purpose.length > 50 ? row.purpose.slice(0, 50) + '…' : row.purpose}</span>
-                            : ''}
-                          {row.payment_or_comp
-                            ? <span style={{ color: s.gray500 }}> · {row.payment_or_comp}</span>
-                            : ''}
-                          {row.grade
-                            ? <span style={{ color: s.gray500 }}> · Grade: {row.grade}</span>
-                            : ''}
-                        </div>
-                      )}
-                      <div style={{ fontSize: 11, color: s.gray500, marginTop: 3 }}>
-                        Submitted {fmtDateTime(row.created_at)}
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
-                      <button onClick={() => handleExportPdf(row)}
-                        style={{ ...btnSecondary, padding: '4px 12px', fontSize: 13 }}>
-                        Export PDF
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
+          {/* Slips whose date falls outside the generated pay-period range */}
+          {undated.length > 0 && renderPeriodSection({ period: { start: 'undated', label: 'Undated / Other' }, rows: undated }, false)}
         </>
       )}
     </>
